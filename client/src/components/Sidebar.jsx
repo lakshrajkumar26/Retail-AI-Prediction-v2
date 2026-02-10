@@ -6,6 +6,7 @@ const Sidebar = ({ activeView, setActiveView }) => {
     { id: "bulk", icon: "📋", label: "Bulk Orders" },
     { id: "prediction", icon: "🎯", label: "Smart Prediction" },
     { id: "forecast", icon: "📈", label: "Forecast" },
+    { id: "upload", icon: "📤", label: "Upload Data" },
     { id: "inventory", icon: "📦", label: "Inventory" },
     { id: "analytics", icon: "📉", label: "Analytics" },
     { id: "settings", icon: "⚙️", label: "Settings" },

@@ -38,3 +38,26 @@ export const getBulkPrediction = async (storeId, predictionDate) => {
   });
   return res.data;
 };
+
+export const uploadData = async (file) => {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await axios.post(`${API}/upload_data`, formData, {
+    headers: {
+      "Content-Type": "multipart/form-data",
+    },
+  });
+  return res.data;
+};
+
+export const trainModel = async (storeId) => {
+  const res = await axios.post(`${API}/train_model`, {
+    store_id: storeId
+  });
+  return res.data;
+};
+
+export const getTrainingStatus = async () => {
+  const res = await axios.get(`${API}/training_status`);
+  return res.data;
+};

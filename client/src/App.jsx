@@ -3,6 +3,7 @@ import Dashboard from "./pages/Dashboard";
 import Forecast from "./pages/Forecast";
 import Prediction from "./pages/Prediction";
 import BulkPrediction from "./pages/BulkPrediction";
+import DataUpload from "./pages/DataUpload";
 import Sidebar from "./components/Sidebar";
 import "./App.css";
 
@@ -17,6 +18,7 @@ function App() {
         {activeView === "bulk" && <BulkPrediction />}
         {activeView === "forecast" && <Forecast />}
         {activeView === "prediction" && <Prediction />}
+        {activeView === "upload" && <DataUpload />}
         {activeView === "inventory" && (
           <div style={{ padding: "2rem" }}>
             <h1>Inventory Management</h1>

@@ -87,3 +87,37 @@ model Reorder {
   store   Store   @relation(fields: [storeId], references: [id])
   product Product @relation(fields: [productId], references: [id])
 }
+
+model UploadedData {
+  id                  Int      @id @default(autoincrement())
+  storeId             String
+  productId           String
+  date                DateTime
+  category            String
+  region              String
+  inventoryLevel      Int
+  unitsSold           Int
+  unitsOrdered        Int
+  demandForecast      Float
+  price               Float
+  discount            Float
+  weatherCondition    String
+  holidayPromotion    Int
+  competitorPricing   Float
+  seasonality         String
+  uploadedAt          DateTime @default(now())
+  
+  @@index([storeId])
+  @@index([productId])
+  @@index([date])
+}
+
+model TrainedModel {
+  id          Int      @id @default(autoincrement())
+  storeId     String   @unique
+  modelPath   String
+  encoderPath String
+  accuracy    Float
+  trainedAt   DateTime @default(now())
+  recordCount Int
+}

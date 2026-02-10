@@ -5,7 +5,7 @@ import ErrorMessage from "../components/ErrorMessage";
 import "./BulkPrediction.css";
 
 const BulkPrediction = () => {
-  const [stores, setStores] = useState([]);
+  const [stores, setStores] = useState(["S001", "S002", "S003", "S004", "S005"]);
   const [selectedStore, setSelectedStore] = useState("S001");
   const [predictionDate, setPredictionDate] = useState(
     new Date().toISOString().split("T")[0]
@@ -22,9 +22,12 @@ const BulkPrediction = () => {
   const loadStores = async () => {
     try {
       const data = await getStores();
-      setStores(data.stores || []);
+      if (data.stores && data.stores.length > 0) {
+        setStores(data.stores);
+      }
     } catch (error) {
       console.error("Failed to load stores:", error);
+      // Keep default stores if API fails
     }
   };
 
@@ -34,10 +37,19 @@ const BulkPrediction = () => {
     setExpandedProduct(null);
     try {
       const data = await getBulkPrediction(selectedStore, predictionDate);
+      
+      // Check if there's an error in the response
+      if (data.error) {
+        setError(data.error);
+        setResult(null);
+        return;
+      }
+      
       setResult(data);
     } catch (err) {
-      setError("Failed to generate predictions. Please check if the API is running.");
-      console.error(err);
+      const errorMsg = err.response?.data?.error || err.message || "Failed to generate predictions. Please check if the API is running.";
+      setError(errorMsg);
+      console.error("Bulk prediction error:", err);
     } finally {
       setLoading(false);
     }
@@ -130,6 +142,14 @@ const BulkPrediction = () => {
       {loading && <LoadingSpinner message="Analyzing all products..." />}
 
       {error && <ErrorMessage message={error} onRetry={handleGenerate} />}
+
+      {!result && !loading && !error && (
+        <div className="empty-state">
+          <div className="empty-icon">📊</div>
+          <h3>No Predictions Yet</h3>
+          <p>Select a store and date above, then click "Generate Predictions" to see order recommendations for all products.</p>
+        </div>
+      )}
 
       {result && !loading && (
         <>

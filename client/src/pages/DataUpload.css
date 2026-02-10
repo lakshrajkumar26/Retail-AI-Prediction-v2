@@ -1,0 +1,290 @@
+.data-upload-page {
+  max-width: 1400px;
+  margin: 0 auto;
+}
+
+.upload-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(500px, 1fr));
+  gap: 2rem;
+  margin-bottom: 2rem;
+}
+
+.upload-card,
+.training-card,
+.status-card,
+.instructions-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 2rem;
+}
+
+.upload-card h2,
+.training-card h2,
+.status-card h2,
+.instructions-card h2 {
+  font-size: 1.5rem;
+  font-weight: 600;
+  margin-bottom: 1rem;
+}
+
+.card-description {
+  color: var(--text-muted);
+  margin-bottom: 1.5rem;
+  line-height: 1.6;
+}
+
+/* Upload Area */
+.upload-area {
+  margin: 2rem 0;
+}
+
+.file-input {
+  display: none;
+}
+
+.file-label {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 3rem 2rem;
+  border: 2px dashed var(--border);
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s;
+  background: var(--bg-primary);
+}
+
+.file-label:hover {
+  border-color: var(--primary);
+  background: rgba(99, 102, 241, 0.05);
+}
+
+.upload-icon {
+  font-size: 3rem;
+  margin-bottom: 1rem;
+}
+
+.upload-text {
+  font-size: 1.1rem;
+  color: var(--text-primary);
+  margin-bottom: 0.5rem;
+}
+
+.upload-hint {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* File Info */
+.file-info {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+  margin-top: 1rem;
+}
+
+.file-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.file-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.file-size {
+  font-size: 0.875rem;
+  color: var(--text-muted);
+}
+
+/* Training Options */
+.training-options {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin: 2rem 0;
+}
+
+.btn-large {
+  width: 100%;
+  padding: 1rem 2rem;
+  font-size: 1.1rem;
+}
+
+/* Result Box */
+.result-box {
+  padding: 1.5rem;
+  border-radius: 8px;
+  margin-top: 1.5rem;
+}
+
+.result-box.success {
+  background: rgba(16, 185, 129, 0.1);
+  border: 1px solid var(--success);
+}
+
+.result-box.error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid var(--danger);
+}
+
+.result-box h3 {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.result-details {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.result-details p {
+  font-size: 0.95rem;
+  color: var(--text-secondary);
+}
+
+.success-message {
+  color: var(--success);
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+.error-message {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Training Results */
+.training-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.training-result-item {
+  padding: 1rem;
+  background: var(--bg-tertiary);
+  border-radius: 8px;
+}
+
+.training-result-item h4 {
+  font-size: 1rem;
+  margin-bottom: 0.5rem;
+  color: var(--primary);
+}
+
+.training-result-item p {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin: 0.25rem 0;
+}
+
+/* Models Grid */
+.models-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.model-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  transition: all 0.2s;
+}
+
+.model-card:hover {
+  border-color: var(--primary);
+  transform: translateY(-2px);
+}
+
+.model-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.model-icon {
+  font-size: 2rem;
+}
+
+.model-header h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+}
+
+.model-details p {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  margin: 0.5rem 0;
+}
+
+/* Instructions */
+.instructions-content {
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+  margin-top: 1.5rem;
+}
+
+.instruction-step {
+  display: flex;
+  gap: 1.5rem;
+  align-items: flex-start;
+}
+
+.step-number {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  background: var(--primary);
+  color: white;
+  border-radius: 50%;
+  font-weight: 700;
+  font-size: 1.25rem;
+  flex-shrink: 0;
+}
+
+.instruction-step h3 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.instruction-step p {
+  font-size: 0.95rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+}
+
+@media (max-width: 1024px) {
+  .upload-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 768px) {
+  .models-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .training-results {
+    grid-template-columns: 1fr;
+  }
+}
