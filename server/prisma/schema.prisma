@@ -1,0 +1,89 @@
+// ===============================
+// PRISMA SCHEMA (FIXED)
+// ===============================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ===============================
+// MODELS
+// ===============================
+
+model Store {
+  id        Int        @id @default(autoincrement())
+  name      String
+  region    String
+  inventory Inventory[]
+  sales     Sales[]
+  forecasts Forecast[]
+  reorders  Reorder[]
+}
+
+model Product {
+  id        Int        @id @default(autoincrement())
+  name      String
+  category  String
+  price     Float
+  inventory Inventory[]
+  sales     Sales[]
+  forecasts Forecast[]
+  reorders  Reorder[]
+}
+
+model Inventory {
+  id        Int      @id @default(autoincrement())
+  storeId   Int
+  productId Int
+  stock     Int
+  updatedAt DateTime @updatedAt
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+
+  @@unique([storeId, productId])
+}
+
+model Sales {
+  id        Int      @id @default(autoincrement())
+  storeId   Int
+  productId Int
+  date      DateTime
+  unitsSold Int
+  discount  Float
+  holiday   Boolean
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model Forecast {
+  id        Int      @id @default(autoincrement())
+  storeId   Int
+  productId Int
+  weekStart DateTime
+  demand    Float
+  createdAt DateTime @default(now())
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
+
+model Reorder {
+  id           Int      @id @default(autoincrement())
+  storeId      Int
+  productId    Int
+  demand       Float
+  reorderPoint Float
+  orderQty     Int
+  riskLevel    String
+  createdAt    DateTime @default(now())
+
+  store   Store   @relation(fields: [storeId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+}
