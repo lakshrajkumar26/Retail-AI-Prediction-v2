@@ -67,9 +67,23 @@ const FiltersBar = ({
           />
           {budgetSummary && (
             <div className="budget-info">
-              ✓ {budgetSummary.itemsSelected} items | ₹{budgetSummary.spent.toLocaleString()} spent
+              ✓ {budgetSummary.itemsSelected} items | ₹{Math.round(budgetSummary.spent).toLocaleString()} spent
             </div>
           )}
+        </div>
+
+        <div className="filter-group">
+          <label htmlFor="budget-strategy">Budget Strategy</label>
+          <select
+            id="budget-strategy"
+            value={filters.budgetStrategy || 'greedy'}
+            onChange={(e) => onFilterChange('budgetStrategy', e.target.value)}
+            className="filter-select"
+          >
+            <option value="greedy">Greedy (Top demand overall)</option>
+            <option value="by_category">Distribute by Category</option>
+            <option value="by_group">Distribute by Group</option>
+          </select>
         </div>
 
         <div className="filter-group">
@@ -157,6 +171,9 @@ const FiltersBar = ({
         {budgetSummary && (
           <span className="budget-summary">
             | 💰 Budget: ₹{budgetSummary.budget.toLocaleString()} | Spent: ₹{budgetSummary.spent.toLocaleString()} | Remaining: ₹{budgetSummary.remaining.toLocaleString()}
+            {Array.isArray(budgetSummary.groups) && budgetSummary.groups.length > 0 ? (
+              <> | Split: {budgetSummary.groups.slice(0, 3).map(g => `${g.key} ₹${Math.round(g.spent).toLocaleString()}`).join(' • ')}{budgetSummary.groups.length > 3 ? ' • …' : ''}</>
+            ) : null}
           </span>
         )}
       </div>

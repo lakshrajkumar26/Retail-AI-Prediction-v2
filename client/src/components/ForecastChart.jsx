@@ -61,7 +61,7 @@ const ForecastChart = ({ data }) => {
       }));
   } else {
     // Single item - show as a bar
-    chartData = chartData.map((item, idx) => ({
+    chartData = chartData.map((item) => ({
       ...item,
       display_name: item.item_name || 'Forecast'
     }));

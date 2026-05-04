@@ -47,7 +47,7 @@ const ProductRow = ({ product, isExpanded, onToggleExpand, predictionDate }) => 
         </td>
         <td>
           <button
-            onClick={() => onToggleExpand(product.item_name)}
+            onClick={() => onToggleExpand(product.item_id || product.item_name)}
             className="expand-btn"
             title={isExpanded ? 'Hide Details' : 'Show Details'}
           >

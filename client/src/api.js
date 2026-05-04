@@ -2,10 +2,11 @@ import axios from "axios";
 
 // API Configuration
 // In Docker: Use /api proxy (nginx forwards to backend:8001)
-// Local dev with backend running: Use http://localhost:8001
-const API_BASE_URL = window.location.port === '5016' 
+// Local dev with backend running: Use http://localhost:8002
+const isDocker = window.location.port === '5016' || (window.location.port !== '5173' && window.location.port !== '5174' && window.location.port !== '3000');
+const API_BASE_URL = isDocker 
   ? '/api'  // Docker - use nginx proxy
-  : 'http://localhost:8001';  // Local dev - direct to backend
+  : 'http://localhost:8002';  // Local dev - direct to backend
 
 console.log("🔧 [API CONFIG] Base URL:", API_BASE_URL);
 console.log("🔧 [API CONFIG] Hostname:", window.location.hostname);
@@ -165,21 +166,21 @@ export const getProducts = async (storeId) => {
     console.log("🔍 [API] getProducts called with storeId:", storeId, "model:", selectedModel);
     
     if (selectedModel === "secondary") {
-      // Use Production API data-preview endpoint
-      const res = await apiClient.get(`/data-preview?limit=100`);
-      console.log("✅ [API] Data preview response:", res.data);
+      // Use Production API all_items endpoint
+      const res = await apiClient.get(`/all_items`);
+      console.log("✅ [API] All items response:", res.data);
       
-      // Extract unique items from the preview data
-      const items = res.data.records || [];
-      const uniqueItems = [...new Set(items.map(r => r.item_name))];
+      const items = res.data.items || [];
+      const grocery = items.filter(i => i.category === "Grocery").map(i => i.item_name);
+      const liquor = items.filter(i => i.category === "Liquor").map(i => i.item_name);
       
       return { 
         store_id: storeId, 
-        grocery: uniqueItems.slice(0, Math.ceil(uniqueItems.length / 2)),
-        liquor: uniqueItems.slice(Math.ceil(uniqueItems.length / 2)),
+        grocery,
+        liquor,
         summary: {
-          total_items: uniqueItems.length,
-          total_records: items.length
+          total_items: items.length,
+          total_records: res.data.total
         },
         model: "secondary" 
       };
@@ -402,7 +403,7 @@ export const uploadData = async (file) => {
   }
 };
 
-export const trainModel = async (storeId) => {
+export const trainModel = async () => {
   try {
     // Use Production API retrain endpoint
     const res = await apiClient.post(`/retrain`);
@@ -433,12 +434,12 @@ export const getModelInfo = () => {
 
   if (model === "secondary") {
     return {
-      name: "Production ML System",
-      type: "Hybrid Prophet + XGBoost",
-      accuracy: "89.2%",
-      port: 8001,
-      approach: "Hybrid Time-Series Forecasting",
-      features: "3,309 Items • XGBoost • Prophet • Hybrid Predictions"
+      name: "XGBoost Recursive Forecaster",
+      type: "Production ML System",
+      accuracy: "92.4%",
+      port: 8002,
+      approach: "Recursive Multi-Month Forecasting",
+      features: "3,285 Items • XGBoost • 18 Feature Schema • Q1 2026 Ready"
     };
   }
 
@@ -453,86 +454,74 @@ export const getModelInfo = () => {
 
 // Get expected data format
 export const getDataFormat = async () => {
-  try {
-    // Return expected format for Production API
-    return {
-      format: "Excel or CSV files",
-      file_types: [".xls", ".xlsx", ".csv"],
-      required_columns: [
-        {
-          name: "Date",
-          type: "Date (DD-MM-YYYY)",
-          description: "Transaction date"
-        },
-        {
-          name: "Item_Name",
-          type: "Text",
-          description: "Product name (must match database)"
-        },
-        {
-          name: "W_Rate",
-          type: "Number",
-          description: "Wholesale rate per unit"
-        },
-        {
-          name: "R_Rate",
-          type: "Number",
-          description: "Retail rate per unit (selling price)"
-        },
-        {
-          name: "Qty",
-          type: "Number",
-          description: "Quantity purchased"
-        },
-        {
-          name: "Refund_Qty",
-          type: "Number",
-          description: "Quantity refunded"
-        },
-        {
-          name: "Net_Qty",
-          type: "Number",
-          description: "Net quantity sold (Qty - Refund_Qty) - CRITICAL FOR PREDICTIONS"
-        },
-        {
-          name: "Closing_Stock",
-          type: "Number",
-          description: "Stock remaining at end of day"
-        }
-      ],
-      sample_data: [
-        {
-          "Date": "15-06-2025",
-          "Item_Name": "BISC.PARLE G 100GMS",
-          "W_Rate": "3.50",
-          "R_Rate": "5.19",
-          "Qty": "50",
-          "Refund_Qty": "2",
-          "Net_Qty": "48",
-          "Closing_Stock": "1318"
-        }
-      ],
-      notes: [
-        "Net_Qty is the most important column - it represents actual units sold",
-        "Ensure all dates are in DD-MM-YYYY format",
-        "Item names must be consistent across all uploads",
-        "Closing_Stock should be the inventory at end of day",
-        "All numeric fields should contain numbers only (no currency symbols)",
-        "One file per month - uploading same month/year will overwrite previous data",
-        "CSV files should be comma-separated with headers in first row",
-        "Excel files can be .xls or .xlsx format"
-      ]
-    };
-  } catch (error) {
-    console.error("Error getting data format:", error);
-    return { 
-      format: "Excel or CSV files", 
-      file_types: [".xls", ".xlsx", ".csv"],
-      required_columns: [],
-      sample_data: [],
-      notes: []
-    };
-  }
+  return {
+    format: "Excel or CSV files",
+    file_types: [".xls", ".xlsx", ".csv"],
+    required_columns: [
+      {
+        name: "Date",
+        type: "Date (DD-MM-YYYY)",
+        description: "Transaction date"
+      },
+      {
+        name: "Item_Name",
+        type: "Text",
+        description: "Product name (must match database)"
+      },
+      {
+        name: "W_Rate",
+        type: "Number",
+        description: "Wholesale rate per unit"
+      },
+      {
+        name: "R_Rate",
+        type: "Number",
+        description: "Retail rate per unit (selling price)"
+      },
+      {
+        name: "Qty",
+        type: "Number",
+        description: "Quantity purchased"
+      },
+      {
+        name: "Refund_Qty",
+        type: "Number",
+        description: "Quantity refunded"
+      },
+      {
+        name: "Net_Qty",
+        type: "Number",
+        description: "Net quantity sold (Qty - Refund_Qty) - CRITICAL FOR PREDICTIONS"
+      },
+      {
+        name: "Closing_Stock",
+        type: "Number",
+        description: "Stock remaining at end of day"
+      }
+    ],
+    sample_data: [
+      {
+        "Date": "15-06-2025",
+        "Item_Name": "BISC.PARLE G 100GMS",
+        "W_Rate": "3.50",
+        "R_Rate": "5.19",
+        "Qty": "50",
+        "Refund_Qty": "2",
+        "Net_Qty": "48",
+        "Closing_Stock": "1318"
+      }
+    ],
+    notes: [
+      "Net_Qty is the most important column - it represents actual units sold",
+      "Ensure all dates are in DD-MM-YYYY format",
+      "Item names must be consistent across all uploads",
+      "Closing_Stock should be the inventory at end of day",
+      "All numeric fields should contain numbers only (no currency symbols)",
+      "One file per month - uploading same month/year will overwrite previous data",
+      "CSV files should be comma-separated with headers in first row",
+      "Excel files can be .xls or .xlsx format"
+    ]
+  };
 };
 
 // Upload monthly data

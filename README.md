@@ -1,3 +1,9 @@
+# Run Code
+
+- python -m uvicorn inventory_model_secondary.src.api_production:app --reload --port 8002
+- npm run dev
+
+
 # 🎯 Retail AI Prediction - Demand Forecasting System
 
 Production-ready ML system for inventory demand forecasting using Hybrid Prophet + XGBoost with advanced analytics.

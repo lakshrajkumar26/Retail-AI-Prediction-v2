@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { getDataFormat, uploadMonthlyData, updateStock, retrainModel } from "../api";
+import { getDataFormat, uploadMonthlyData, retrainModel } from "../api";
 import LoadingSpinner from "../components/LoadingSpinner";
 import "./DataUpload.css";
 
@@ -19,10 +19,6 @@ const DataUpload = () => {
   const [selectedMonth, setSelectedMonth] = useState(new Date().getMonth() + 1);
   const [selectedCategory, setSelectedCategory] = useState("Grocery");
   
-  // Stock update
-  const [stockUpdates, setStockUpdates] = useState([]);
-  const [showStockUpdate, setShowStockUpdate] = useState(false);
-
   useEffect(() => {
     loadDataFormat();
     checkModelHealth();
@@ -46,17 +42,20 @@ const DataUpload = () => {
     try {
       const baseURL = window.location.port === '5016' 
         ? '/api'  // Docker - use nginx proxy
-        : 'http://localhost:8001';  // Local dev - direct to backend
+        : 'http://localhost:8002';  // Local dev - direct to backend
       
       const response = await fetch(`${baseURL}/health`);
       const data = await response.json();
+      const isHealthy = data.status === "healthy";
       setModelHealth({
         status: data.status,
-        message: data.hybrid_system ? "Model API is ready" : "Model API not responding",
+        message: isHealthy
+          ? "Model API is healthy"
+          : (data.startup_error ? `Model not ready: ${data.startup_error}` : "Model API not ready"),
         timestamp: new Date().toLocaleTimeString(),
-        isHealthy: data.status === "ready"
+        isHealthy
       });
-    } catch (error) {
+    } catch {
       setModelHealth({
         status: "error",
         message: "Model API not responding",
@@ -72,7 +71,7 @@ const DataUpload = () => {
     try {
       const baseURL = window.location.port === '5016' 
         ? '/api'  // Docker - use nginx proxy
-        : 'http://localhost:8001';  // Local dev - direct to backend
+        : 'http://localhost:8002';  // Local dev - direct to backend
       
       const response = await fetch(`${baseURL}/data-preview?limit=10`);
       const data = await response.json();
@@ -126,9 +125,16 @@ const DataUpload = () => {
       const result = await uploadMonthlyData(file, selectedYear, selectedMonth, selectedCategory);
       
       console.log("Upload result:", result);
-      setUploadResult(result);
+      setUploadResult({
+        ...result,
+        success: result.status === "success",
+        filename: file.name,
+        year: selectedYear,
+        month: selectedMonth,
+        category: selectedCategory
+      });
       
-      if (result.success) {
+      if (result.status === "success") {
         setFile(null);
         document.getElementById("file-input").value = "";
       }
@@ -156,7 +162,7 @@ const DataUpload = () => {
       setRetrainResult(result);
       
       // Refresh model health after successful retrain
-      if (result.status === "success") {
+      if (result.status === "success" || result.status === "info") {
         setTimeout(() => checkModelHealth(), 2000);
       }
     } catch (error) {
@@ -461,34 +467,15 @@ const DataUpload = () => {
           {retrainResult && (
             <div
               className={`result-box ${
-                retrainResult.status === "success" ? "success" : "error"
+                retrainResult.status === "success" || retrainResult.status === "info" ? "success" : "error"
               }`}
             >
-              {retrainResult.status === "success" ? (
+              {retrainResult.status === "success" || retrainResult.status === "info" ? (
                 <>
-                  <h3>✅ Model Retrained Successfully!</h3>
+                  <h3>{retrainResult.status === "success" ? "✅ Model Retrained Successfully!" : "ℹ️ Retrain Info"}</h3>
                   <div className="result-details">
                     <p className="success-message">{retrainResult.message}</p>
-                    {retrainResult.xgboost && (
-                      <div className="statistics-grid">
-                        <div className="stat-item">
-                          <span className="stat-label">XGBoost Accuracy</span>
-                          <span className="stat-value">{retrainResult.xgboost.accuracy}</span>
-                        </div>
-                        <div className="stat-item">
-                          <span className="stat-label">MAE</span>
-                          <span className="stat-value">{retrainResult.xgboost.mae} units</span>
-                        </div>
-                        <div className="stat-item">
-                          <span className="stat-label">RMSE</span>
-                          <span className="stat-value">{retrainResult.xgboost.rmse} units</span>
-                        </div>
-                        <div className="stat-item">
-                          <span className="stat-label">Prophet Status</span>
-                          <span className="stat-value">{retrainResult.prophet?.status || 'N/A'}</span>
-                        </div>
-                      </div>
-                    )}
+                    {retrainResult.note && <p className="note-message">{retrainResult.note}</p>}
                   </div>
                 </>
               ) : (

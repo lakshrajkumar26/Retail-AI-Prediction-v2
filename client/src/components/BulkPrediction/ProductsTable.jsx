@@ -32,9 +32,9 @@ const ProductsTable = ({ products, expandedId, onToggleExpand, predictionDate })
         <tbody>
           {products.map((product) => (
             <ProductRow
-              key={product.item_name}
+              key={product.item_id || product.item_name}
               product={product}
-              isExpanded={expandedId === product.item_name}
+              isExpanded={expandedId === (product.item_id || product.item_name)}
               onToggleExpand={onToggleExpand}
               predictionDate={predictionDate}
             />

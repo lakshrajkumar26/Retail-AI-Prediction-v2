@@ -2,10 +2,13 @@
  * Prediction Service - Handles all API calls for predictions
  */
 
-// Use /api proxy in Docker, direct localhost:8001 for local dev
-const API_BASE_URL = window.location.port === '5016'
+// Use /api proxy when running behind nginx (Docker), direct localhost for local dev
+// Docker: nginx runs on 5016, proxies /api to backend:8001
+// Local: frontend on 5173/5174/3000, backend on 8002
+const isDocker = window.location.port === '5016' || window.location.hostname === 'localhost';
+const API_BASE_URL = isDocker && window.location.port !== '5173' && window.location.port !== '5174' && window.location.port !== '3000'
   ? '/api'
-  : 'http://localhost:8001';
+  : 'http://localhost:8002';
 
 console.log('[PREDICTION SERVICE] API Base URL:', API_BASE_URL);
 
@@ -62,6 +65,35 @@ export const predictionService = {
   },
 
   /**
+   * Get aggregate future predictions for bulk ordering
+   */
+  async getFutureAggregatePredictions(predictionDate, nMonths, items = null) {
+    try {
+      const url = `${API_BASE_URL}/predict-future-aggregate`;
+      const body = { 
+        prediction_date: predictionDate,
+        n_months: nMonths,
+        items: items
+      };
+      
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status}`);
+      }
+
+      return await response.json();
+    } catch (error) {
+      console.error('[PREDICTION SERVICE] Future Aggregate Error:', error);
+      throw error;
+    }
+  },
+
+  /**
    * Get all items from database
    */
   async getAllItems() {
@@ -87,16 +119,19 @@ export const predictionService = {
     const headers = [
       'Item Name',
       'Category',
-      'Unit Cost (₹)',
+      'Purchase Price (₹)',
+      'Sales Price (₹)',
       'Current Stock',
       'Predicted Demand (Units)',
-      'Total Cost (₹)',
+      'Total Expected Revenue (₹)',
+      'Total Expected Profit (₹)',
+      'Profit Margin (%)',
       'Trend',
       'Growth Rate',
       'Recommended Order',
       'Confidence',
-      '2024 Total Sales',
-      '2025 Total Sales',
+      'Prev Year Total Sales',
+      'Current Year Total Sales',
       'Month 1 Name',
       'Month 1 Sales',
       'Month 2 Name',
@@ -105,33 +140,43 @@ export const predictionService = {
       'Month 3 Sales',
     ];
 
-    let totalNetCost = 0;
+    let totalNetRevenue = 0;
+    let totalExpectedProfit = 0;
     let totalPredictedDemand = 0;
 
     const rows = predictions.map(p => {
       // Get last 3 months data
       const last3Months = p.last_3_months || [];
       
-      const unitCost = p.price || 0;
+      const salesPrice = p.price || 0;
+      const purchasePrice = p.purchase_price || 0;
       const predictedDemand = Math.round(p.final_prediction || 0);
-      const totalCost = unitCost * predictedDemand;
       
-      totalNetCost += totalCost;
+      const expectedRevenue = salesPrice * predictedDemand;
+      const expectedCost = purchasePrice * predictedDemand;
+      const expectedProfit = expectedRevenue - expectedCost;
+      const profitMargin = purchasePrice > 0 ? ((salesPrice - purchasePrice) / purchasePrice) * 100 : 0;
+      
+      totalNetRevenue += expectedRevenue;
+      totalExpectedProfit += expectedProfit;
       totalPredictedDemand += predictedDemand;
       
       return [
         p.item_name,
         p.category,
-        unitCost.toFixed(2),
+        purchasePrice.toFixed(2),
+        salesPrice.toFixed(2),
         p.current_stock || 0,
         predictedDemand,
-        totalCost.toFixed(2),
+        expectedRevenue.toFixed(2),
+        expectedProfit.toFixed(2),
+        `${profitMargin.toFixed(2)}%`,
         p.trend || 'stable',
         `${((p.growth_rate || 0) * 100).toFixed(1)}%`,
         Math.round(p.recommended_order || 0),
         `${((p.confidence || 0) * 100).toFixed(1)}%`,
-        p.year_2024_total || 0,
-        p.year_2025_total || 0,
+        p.year_prev_total || 0,
+        p.year_curr_total || 0,
         last3Months[0]?.month_name || 'N/A',
         last3Months[0]?.sales || 0,
         last3Months[1]?.month_name || 'N/A',
@@ -147,8 +192,11 @@ export const predictionService = {
       '',
       '',
       '',
+      '',
       totalPredictedDemand,
-      totalNetCost.toFixed(2),
+      totalNetRevenue.toFixed(2),
+      totalExpectedProfit.toFixed(2),
+      '',
       '',
       '',
       '',

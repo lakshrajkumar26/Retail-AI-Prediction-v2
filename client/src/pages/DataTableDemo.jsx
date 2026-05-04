@@ -11,7 +11,6 @@ import './DataTableDemo.css';
 
 const DataTableDemo = () => {
   const [data, setData] = useState([]);
-  const [allData, setAllData] = useState([]);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize] = useState(50);
   const [totalRecords, setTotalRecords] = useState(0);
@@ -36,12 +35,7 @@ const DataTableDemo = () => {
     { key: 'confidence', label: 'Confidence', type: 'percentage', sortable: true }
   ];
 
-  // Load initial data
-  useEffect(() => {
-    loadData(1);
-  }, []);
-
-  const loadData = async (page) => {
+  const loadData = useCallback(async (page) => {
     try {
       setIsLoading(page === 1);
       setIsLoadingMore(page > 1);
@@ -60,10 +54,8 @@ const DataTableDemo = () => {
 
       if (page === 1) {
         setData(result.predictions || []);
-        setAllData(result.predictions || []);
       } else {
         setData(prev => [...prev, ...(result.predictions || [])]);
-        setAllData(prev => [...prev, ...(result.predictions || [])]);
       }
 
       setTotalRecords(result.pagination?.total_items || 0);
@@ -75,11 +67,16 @@ const DataTableDemo = () => {
       setIsLoading(false);
       setIsLoadingMore(false);
     }
-  };
+  }, [pageSize]);
+
+  // Load initial data
+  useEffect(() => {
+    loadData(1);
+  }, [loadData]);
 
   const handleLoadMore = useCallback((nextPage) => {
     loadData(nextPage);
-  }, [pageSize]);
+  }, [loadData]);
 
   const handleExport = (exportData) => {
     const filename = `predictions-${new Date().toISOString().split('T')[0]}.csv`;
@@ -189,7 +186,7 @@ const DataTableDemo = () => {
           <ExportModal
             isOpen={showExportModal}
             onClose={() => setShowExportModal(false)}
-            onSubmit={(options) => {
+            onSubmit={() => {
               // Handle export with options
               handleExport(data);
               setShowExportModal(false);

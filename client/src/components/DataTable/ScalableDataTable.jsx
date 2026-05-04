@@ -1,6 +1,5 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import './ScalableDataTable.css';
-import LoadingSpinner from '../LoadingSpinner';
 
 const ScalableDataTable = ({
   data = [],
@@ -10,27 +9,41 @@ const ScalableDataTable = ({
   isLoading = false,
   totalRecords = 0,
   currentPage = 1,
-  pageSize = 50,
   onExport,
   onPredictPreviousYears,
   onPredictLastNMonths,
-  searchQuery = '',
-  filters = {}
 }) => {
-  const [displayedData, setDisplayedData] = useState([]);
   const [sortConfig, setSortConfig] = useState({ key: null, direction: 'asc' });
   const [selectedRows, setSelectedRows] = useState(new Set());
-  const [isLoadingMore, setIsLoadingMore] = useState(false);
   const observerTarget = useRef(null);
   const tableBodyRef = useRef(null);
   const requestLockRef = useRef(false);
+
+  const displayedData = useMemo(() => {
+    const sorted = [...data];
+    if (!sortConfig.key) return sorted;
+
+    sorted.sort((a, b) => {
+      const aVal = a[sortConfig.key];
+      const bVal = b[sortConfig.key];
+
+      if (typeof aVal === 'number' && typeof bVal === 'number') {
+        return sortConfig.direction === 'asc' ? aVal - bVal : bVal - aVal;
+      }
+
+      const aStr = String(aVal ?? '').toLowerCase();
+      const bStr = String(bVal ?? '').toLowerCase();
+      return sortConfig.direction === 'asc' ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
+    });
+
+    return sorted;
+  }, [data, sortConfig]);
 
   // Intersection Observer for infinite scroll
   useEffect(() => {
     const observer = new IntersectionObserver(
       entries => {
-        if (entries[0].isIntersecting && hasMore && !isLoadingMore && !requestLockRef.current) {
-          setIsLoadingMore(true);
+        if (entries[0].isIntersecting && hasMore && !isLoading && !requestLockRef.current) {
           requestLockRef.current = true;
           
           // Debounce: wait 300ms before allowing next request
@@ -49,13 +62,7 @@ const ScalableDataTable = ({
     }
 
     return () => observer.disconnect();
-  }, [hasMore, isLoadingMore, currentPage, onLoadMore]);
-
-  // Update displayed data when data changes
-  useEffect(() => {
-    setDisplayedData(data);
-    setIsLoadingMore(false);
-  }, [data]);
+  }, [hasMore, isLoading, currentPage, onLoadMore]);
 
   // Handle sorting
   const handleSort = (key) => {
@@ -64,21 +71,6 @@ const ScalableDataTable = ({
       direction = 'desc';
     }
     setSortConfig({ key, direction });
-
-    const sorted = [...displayedData].sort((a, b) => {
-      const aVal = a[key];
-      const bVal = b[key];
-
-      if (typeof aVal === 'number' && typeof bVal === 'number') {
-        return direction === 'asc' ? aVal - bVal : bVal - aVal;
-      }
-
-      const aStr = String(aVal).toLowerCase();
-      const bStr = String(bVal).toLowerCase();
-      return direction === 'asc' ? aStr.localeCompare(bStr) : bStr.localeCompare(aStr);
-    });
-
-    setDisplayedData(sorted);
   };
 
   // Handle row selection
@@ -244,7 +236,7 @@ const ScalableDataTable = ({
       </div>
 
       {/* Loading indicator for infinite scroll */}
-      {isLoadingMore && (
+      {isLoading && (
         <div className="loading-more">
           <div className="spinner-small"></div>
           <span>Loading more records...</span>

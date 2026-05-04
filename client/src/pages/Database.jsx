@@ -21,7 +21,7 @@ const Database = () => {
       setLoading(true);
       const baseURL = window.location.port === '5016' 
         ? '/api'  // Docker - use nginx proxy
-        : 'http://localhost:8001';  // Local dev - direct to backend
+        : 'http://localhost:8002';  // Local dev - direct to backend
       
       const response = await fetch(`${baseURL}/`);
       const info = await response.json();
@@ -113,6 +113,17 @@ const Database = () => {
       filtered = filtered.filter(item => 
         item.category.toLowerCase() === selectedCategory.toLowerCase()
       );
+    }
+
+    // Year filter: keep items whose available date range intersects the selected year
+    if (selectedYear) {
+      const y = parseInt(selectedYear);
+      filtered = filtered.filter(item => {
+        const firstY = item.first_date ? new Date(item.first_date).getFullYear() : null;
+        const lastY = item.last_date ? new Date(item.last_date).getFullYear() : null;
+        if (firstY === null || Number.isNaN(firstY) || lastY === null || Number.isNaN(lastY)) return true;
+        return y >= firstY && y <= lastY;
+      });
     }
     
     if (searchQuery) {
@@ -411,59 +422,6 @@ const Database = () => {
           </div>
         </>
       )}
-      {viewMode === "overview" && (
-        <>
-          {/* Category Breakdown */}
-          <div className="category-breakdown">
-            <h2>📂 Category Breakdown</h2>
-            <div className="breakdown-grid">
-              <div className="breakdown-card">
-                <h3>🛒 Grocery Items</h3>
-                <div className="breakdown-content">
-                  <div className="stat-row">
-                    <span>Total Items:</span>
-                    <strong>{data.items?.grocery?.total || 0}</strong>
-                  </div>
-                  <div className="stat-row">
-                    <span>Top Seller:</span>
-                    <strong>{data.items?.grocery?.top_seller || "N/A"}</strong>
-                  </div>
-                  <div className="items-preview">
-                    <p className="preview-label">Sample Items:</p>
-                    <ul>
-                      {data.items?.grocery?.items?.slice(0, 5).map((item, idx) => (
-                        <li key={idx}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              </div>
-
-              <div className="breakdown-card">
-                <h3>🍷 Liquor Items</h3>
-                <div className="breakdown-content">
-                  <div className="stat-row">
-                    <span>Total Items:</span>
-                    <strong>{data.items?.liquor?.total || 0}</strong>
-                  </div>
-                  <div className="stat-row">
-                    <span>Top Seller:</span>
-                    <strong>{data.items?.liquor?.top_seller || "N/A"}</strong>
-                  </div>
-                  <div className="items-preview">
-                    <p className="preview-label">Sample Items:</p>
-                    <ul>
-                      {data.items?.liquor?.items?.slice(0, 5).map((item, idx) => (
-                        <li key={idx}>{item}</li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </>
-      )}
 
       {/* Data Period Info */}
       <div className="data-period-card">
@@ -544,7 +502,7 @@ const Database = () => {
           </div>
           <div className="stat-card">
             <div className="stat-title">Accuracy</div>
-            <div className="stat-value">90.5%</div>
+            <div className="stat-value">{data.inventory?.accuracy || 92.4}%</div>
             <div className="stat-description">Average prediction accuracy</div>
           </div>
         </div>

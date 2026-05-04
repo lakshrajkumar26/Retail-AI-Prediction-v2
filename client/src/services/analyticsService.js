@@ -5,7 +5,7 @@
 // Use /api proxy in Docker, direct localhost:8001 for local dev
 const API_BASE_URL = window.location.port === '5016'
   ? '/api'
-  : 'http://localhost:8001';
+  : 'http://localhost:8002';
 
 console.log('[ANALYTICS SERVICE] API Base URL:', API_BASE_URL);
 
@@ -15,7 +15,7 @@ export const analyticsService = {
    */
   async getDatabaseStats() {
     try {
-      const response = await fetch(`${API_BASE_URL}/stats`);
+      const response = await fetch(`${API_BASE_URL}/`);
       if (!response.ok) throw new Error(`API Error: ${response.status}`);
       return await response.json();
     } catch (error) {
@@ -43,7 +43,7 @@ export const analyticsService = {
    */
   async getItemAnalytics(itemName) {
     try {
-      const response = await fetch(`${API_BASE_URL}/analytics/item/${encodeURIComponent(itemName)}`);
+      const response = await fetch(`${API_BASE_URL}/analytics/item-lookup?q=${encodeURIComponent(itemName)}`);
       if (!response.ok) throw new Error(`API Error: ${response.status}`);
       return await response.json();
     } catch (error) {
@@ -57,7 +57,7 @@ export const analyticsService = {
    */
   async getMonthContext(itemName, month) {
     try {
-      const response = await fetch(`${API_BASE_URL}/analytics/item/${encodeURIComponent(itemName)}/month/${month}`);
+      const response = await fetch(`${API_BASE_URL}/analytics/item-month?q=${encodeURIComponent(itemName)}&month=${month}`);
       if (!response.ok) throw new Error(`API Error: ${response.status}`);
       return await response.json();
     } catch (error) {
@@ -85,11 +85,53 @@ export const analyticsService = {
    */
   async getItemHistory(itemName) {
     try {
-      const response = await fetch(`${API_BASE_URL}/analytics/database/item/${encodeURIComponent(itemName)}`);
+      const response = await fetch(`${API_BASE_URL}/analytics/database/item-lookup?q=${encodeURIComponent(itemName)}`);
       if (!response.ok) throw new Error(`API Error: ${response.status}`);
       return await response.json();
     } catch (error) {
       console.error('[ANALYTICS SERVICE] Error getting item history:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get monthly sales trends
+   */
+  async getMonthlySales() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/monthly-sales`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting monthly sales:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get top selling products
+   */
+  async getTopSellers(limit = 5) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/top-sellers?limit=${limit}`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting top sellers:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get accuracy statistics
+   */
+  async getAccuracyStats() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/accuracy`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting accuracy stats:', error);
       throw error;
     }
   },
@@ -188,5 +230,61 @@ export const analyticsService = {
     });
     
     return Object.values(monthlyData).sort((a, b) => a.date.localeCompare(b.date));
+  },
+
+  /**
+   * Get dashboard historical performance data
+   */
+  async getDashboardHistorical() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/dashboard/historical`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting historical data:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get dashboard forecast data
+   */
+  async getDashboardForecast() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/dashboard/forecast`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting forecast data:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get dashboard year-wise data
+   */
+  async getDashboardYearwise() {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/dashboard/yearwise`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting yearwise data:', error);
+      throw error;
+    }
+  },
+
+  /**
+   * Get deep product analysis
+   */
+  async getProductAnalysis(itemName) {
+    try {
+      const response = await fetch(`${API_BASE_URL}/analytics/dashboard/product-analysis?item_name=${encodeURIComponent(itemName)}`);
+      if (!response.ok) throw new Error(`API Error: ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      console.error('[ANALYTICS SERVICE] Error getting product analysis:', error);
+      throw error;
+    }
   },
 };

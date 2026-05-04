@@ -1,11 +1,46 @@
 import React from 'react';
+import { LineChart, Line, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip } from 'recharts';
 import { getShortMonthName } from '../../utils/predictionHelpers';
 import './ExpandedDetails.css';
+
+/* Wrapper that measures its own width so Recharts never collapses */
+const ChartBox = ({ height = 240, children }) => {
+  const ref = React.useRef(null);
+  const [w, setW] = React.useState(0);
+  React.useEffect(() => {
+    const measure = () => { if (ref.current) setW(ref.current.offsetWidth); };
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
+  return (
+    <div ref={ref} style={{ width: '100%', height, minHeight: height }}>
+      {w > 0 && children(w, height)}
+    </div>
+  );
+};
 
 const ExpandedDetails = ({ product, predictionDate }) => {
   const monthName = new Date(predictionDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const shortMonth = new Date(predictionDate).toLocaleDateString('en-US', { month: 'long' });
-  
+
+  // Build chart data from all_monthly_data — newest first, take 12, reverse for chronological
+  const monthlyData = React.useMemo(() => {
+    const raw = product.all_monthly_data || [];
+    if (raw.length === 0) return [];
+    return [...raw]
+      .slice(0, 12)
+      .reverse()
+      .map(d => ({
+        name: `${getShortMonthName(d.month)} '${(d.year || 2025).toString().slice(2)}`,
+        sales: Math.round(d.sales || 0),
+      }));
+  }, [product.all_monthly_data]);
+
+  const TT = {
+    contentStyle: { backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '12px' },
+  };
+
   return (
     <div className="expanded-details">
       <div className="details-grid">
@@ -74,29 +109,58 @@ const ExpandedDetails = ({ product, predictionDate }) => {
           </div>
         )}
 
-        {/* Key Insights */}
-        <div className="detail-section insights-section">
-          <h4>🎯 Key Insights</h4>
-          <ul className="insights-list">
-            <li>
-              <strong>Trend:</strong> {product.trend || 'stable'} - {product.trend_reason || 'No trend data'}
-            </li>
-            <li>
-              <strong>Growth Rate:</strong> {((product.growth_rate || 0) * 100).toFixed(1)}% year-over-year
-            </li>
-            <li>
-              <strong>Historical Average:</strong> {Math.round(product.historical_stats?.avg || 0)} units per {shortMonth}
-            </li>
-            <li>
-              <strong>Data Coverage:</strong> {product.historical_stats?.count || 0} year(s) of historical data
-            </li>
-            <li>
-              <strong>Prediction Range:</strong> {Math.round(product.historical_stats?.min || 0)} - {Math.round(product.historical_stats?.max || 0)} units
-            </li>
-          </ul>
+        {/* ─── Interactive Graphs ─── */}
+        <div className="detail-section graphs-section" style={{ gridColumn: '1 / -1', display: 'flex', gap: '2rem', flexWrap: 'wrap' }}>
+          {/* Sales Trend Line Chart */}
+          <div style={{ flex: '1 1 400px', minWidth: '300px' }}>
+            <h4>📈 Sales Trend (Last 12 Months)</h4>
+            {monthlyData.length > 0 ? (
+              <div style={{ marginTop: '1rem', background: 'rgba(15,23,42,0.3)', borderRadius: '8px', padding: '1rem' }}>
+                <ChartBox height={240}>
+                  {(w, h) => (
+                    <LineChart width={w} height={h} data={monthlyData} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                      <XAxis dataKey="name" stroke="#94a3b8" tick={{ fontSize: 10, fill: '#94a3b8' }} tickMargin={8} />
+                      <YAxis stroke="#94a3b8" tick={{ fontSize: 10, fill: '#94a3b8' }} width={40} />
+                      <Tooltip {...TT} />
+                      <Line type="monotone" dataKey="sales" stroke="#3b82f6" strokeWidth={3} dot={{ r: 4, fill: '#3b82f6', strokeWidth: 2, stroke: '#0f172a' }} activeDot={{ r: 6 }} name="Units Sold" />
+                    </LineChart>
+                  )}
+                </ChartBox>
+              </div>
+            ) : (
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', background: 'rgba(15,23,42,0.3)', borderRadius: '8px', marginTop: '1rem' }}>
+                No historical data available
+              </div>
+            )}
+          </div>
+          
+          {/* Monthly Breakdown Bar Chart */}
+          <div style={{ flex: '1 1 400px', minWidth: '300px' }}>
+            <h4>📊 Monthly Breakdown</h4>
+            {monthlyData.length > 0 ? (
+              <div style={{ marginTop: '1rem', background: 'rgba(15,23,42,0.3)', borderRadius: '8px', padding: '1rem' }}>
+                <ChartBox height={240}>
+                  {(w, h) => (
+                    <BarChart width={w} height={h} data={monthlyData} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" vertical={false} />
+                      <XAxis dataKey="name" stroke="#94a3b8" tick={{ fontSize: 10, fill: '#94a3b8' }} tickMargin={8} />
+                      <YAxis stroke="#94a3b8" tick={{ fontSize: 10, fill: '#94a3b8' }} width={40} />
+                      <Tooltip {...TT} cursor={{ fill: '#1e293b' }} />
+                      <Bar dataKey="sales" fill="#10b981" radius={[4, 4, 0, 0]} name="Units Sold" />
+                    </BarChart>
+                  )}
+                </ChartBox>
+              </div>
+            ) : (
+              <div style={{ height: 200, display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#64748b', background: 'rgba(15,23,42,0.3)', borderRadius: '8px', marginTop: '1rem' }}>
+                No historical data available
+              </div>
+            )}
+          </div>
         </div>
 
-        {/* Monthly Sales History */}
+        {/* Monthly Sales History Table */}
         {product.all_monthly_data && product.all_monthly_data.length > 0 && (
           <div className="detail-section history-section">
             <h4>📊 Monthly Sales History</h4>

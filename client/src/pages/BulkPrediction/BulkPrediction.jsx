@@ -8,8 +8,15 @@ import {
   filterPredictions,
   sortPredictions,
   calculateSummary,
+  allocateBudget,
 } from '../../utils/predictionHelpers';
 import './BulkPrediction.css';
+
+const getApiBase = () => {
+  const devPorts = ['5173', '5174', '3000'];
+  const isLocalDev = window.location.hostname === 'localhost' && devPorts.includes(window.location.port);
+  return isLocalDev ? 'http://localhost:8002' : '/api';
+};
 
 // Initial state
 const initialState = {
@@ -25,6 +32,7 @@ const initialState = {
     trend: 'all',
     sortBy: 'priority',
     sortOrder: 'asc',
+    budgetStrategy: 'greedy', // greedy | by_category | by_group
   },
   // Budget filtering
   budget: null, // in rupees
@@ -40,10 +48,8 @@ const initialState = {
   predictionResults: [],
   predictionLoading: false,
   predictionProgress: null, // { current: 0, total: 0, percentage: 0 }
-  showPreviousYearsModal: false,
-  showLastNMonthsModal: false,
-  selectedDate: new Date().toISOString().split('T')[0],
-  selectedMonths: 4,
+  showFutureAggregateModal: false,
+  selectedMonths: 3,
   // Prediction results pagination
   resultsPage: 1,
   resultsPageSize: 50,
@@ -154,7 +160,9 @@ const BulkPrediction = () => {
     }
     
     try {
-      const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-paginated?page=${page}&page_size=50`;
+      // Use /api proxy when running behind nginx (Docker), direct localhost for local dev
+      const apiBase = getApiBase();
+      const url = `${apiBase}/predict-paginated?page=${page}&page_size=50`;
       const body = { prediction_date: state.predictionDate };
       
       const controller = new AbortController();
@@ -178,8 +186,10 @@ const BulkPrediction = () => {
 
       const result = await response.json();
       
-      if (result && result.predictions) {
-        const processed = result.predictions.map(processPrediction);
+      if (result && Array.isArray(result.predictions)) {
+        const processed = result.predictions
+          .map(processPrediction)
+          .filter(p => p !== null);
         
         if (page === 1) {
           dispatch({ type: 'SET_PREDICTIONS', payload: processed });
@@ -261,50 +271,22 @@ const BulkPrediction = () => {
 
   // Calculate summary statistics
   const summary = useMemo(() => {
-    return calculateSummary(processedProducts);
+    try {
+      if (!processedProducts || !Array.isArray(processedProducts)) {
+        return calculateSummary([]);
+      }
+      return calculateSummary(processedProducts);
+    } catch (err) {
+      console.error('Summary calculation failed:', err);
+      return calculateSummary([]);
+    }
   }, [processedProducts]);
 
   // Smart budget filtering - prioritize by demand
   const budgetFilteredProducts = useMemo(() => {
-    if (!state.budget || state.budget <= 0) {
-      return { items: processedProducts, summary: null };
-    }
-
-    // Sort by demand (final_prediction) descending to prioritize high-demand items
-    const sorted = [...processedProducts].sort((a, b) => 
-      (b.final_prediction || 0) - (a.final_prediction || 0)
-    );
-
-    let totalCost = 0;
-    const selected = [];
-    const summary = {
-      budget: state.budget,
-      spent: 0,
-      remaining: state.budget,
-      itemsSelected: 0,
-      itemsSkipped: 0,
-      totalDemand: 0,
-      totalRevenue: 0,
-    };
-
-    for (const item of sorted) {
-      const itemCost = (item.final_prediction || 0) * (item.price || 0);
-      
-      if (totalCost + itemCost <= state.budget) {
-        selected.push(item);
-        totalCost += itemCost;
-        summary.spent = totalCost;
-        summary.remaining = state.budget - totalCost;
-        summary.itemsSelected += 1;
-        summary.totalDemand += item.final_prediction || 0;
-        summary.totalRevenue += itemCost;
-      } else {
-        summary.itemsSkipped += 1;
-      }
-    }
-
-    return { items: selected, summary };
-  }, [processedProducts, state.budget]);
+    if (!state.budget || state.budget <= 0) return { items: processedProducts, summary: null };
+    return allocateBudget(processedProducts, state.budget, state.filters.budgetStrategy);
+  }, [processedProducts, state.budget, state.filters.budgetStrategy]);
 
   // Handlers
   const handleFilterChange = useCallback((key, value) => {
@@ -329,35 +311,20 @@ const BulkPrediction = () => {
   const handleExport = useCallback(async () => {
     dispatch({ type: 'SET_LOADING', payload: true });
     try {
-      // Fetch ALL data with raw predictions (10 minute timeout)
-      const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-paginated?page=1&page_size=10000`;
-      
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 minutes
-      
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prediction_date: state.predictionDate }),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`Server error: ${response.status}`);
-      }
-
-      const result = await response.json();
-      const allData = result.predictions || [];
-      const processed = allData.map(processPrediction);
-
-      // Determine which data to export
+      // Determine what to export:
+      // 1. If budget is set, export the budget-filtered items
+      // 2. Otherwise, export all currently loaded predictions
       const dataToExport = state.budget && state.budget > 0 
         ? budgetFilteredProducts.items 
-        : processed;
+        : processedProducts;
 
-      // Export using the original working format
+      if (!dataToExport || dataToExport.length === 0) {
+        alert('No data available to export. Wait for predictions to load first.');
+        dispatch({ type: 'SET_LOADING', payload: false });
+        return;
+      }
+
+      // Export using the service's CSV generator
       predictionService.exportToCSV(
         dataToExport,
         `predictions_${state.predictionDate}${state.budget ? '_budget' : ''}.csv`
@@ -367,13 +334,9 @@ const BulkPrediction = () => {
     } catch (error) {
       console.error('Export failed:', error);
       dispatch({ type: 'SET_LOADING', payload: false });
-      if (error.name === 'AbortError') {
-        alert('Export timed out. Please try with fewer items or contact support.');
-      } else {
-        alert('Export failed: ' + error.message);
-      }
+      alert('Export failed: ' + error.message);
     }
-  }, [state.predictionDate, state.budget, budgetFilteredProducts]);
+  }, [state.predictionDate, state.budget, budgetFilteredProducts, processedProducts]);
 
   const handleRefresh = useCallback(() => {
     fetchPredictions(1);
@@ -382,304 +345,39 @@ const BulkPrediction = () => {
   // Previous Years Prediction
   const abortControllerRef = React.useRef(null);
 
-  const handlePredictPreviousYears = useCallback(async () => {
-    // Prevent double-clicks
-    if (state.predictionLoading) {
-      console.log('[PREDICTION] Already loading, ignoring click');
-      return;
-    }
-    
+  const handlePredictFutureAggregate = useCallback(async () => {
+    if (state.predictionLoading) return;
     dispatch({ type: 'SET_PREDICTION_LOADING', payload: true });
     
-    // Create NEW abort controller for this request
     const controller = new AbortController();
     abortControllerRef.current = controller;
     
-    let timeoutId = null;
-    
     try {
-      // Fetch ALL items first if not all loaded
       let allItems = state.predictions.map(d => d.item_name);
       
       if (state.hasMore) {
-        console.log('[PREDICTION] Fetching all items for prediction...');
-        const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-paginated?page=1&page_size=10000`;
-        
-        const controller1 = new AbortController();
-        const timeoutId1 = setTimeout(() => controller1.abort(), 600000); // 10 minutes
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prediction_date: state.predictionDate }),
-          signal: controller1.signal
-        });
-        
-        clearTimeout(timeoutId1);
-        
-        if (!response.ok) throw new Error(`Failed to fetch items: ${response.status}`);
-        
-        const result = await response.json();
+        const result = await predictionService.getBulkPredictions(state.predictionDate);
         allItems = (result.predictions || []).map(p => p.item_name);
-        console.log('[PREDICTION] Fetched all items:', allItems.length);
       }
 
-      // Fetch predictions in pages of 50 items
-      const pageSize = 50;
-      const totalPages = Math.ceil(allItems.length / pageSize);
-      let allPredictions = [];
+      const result = await predictionService.getFutureAggregatePredictions(
+        state.predictionDate, 
+        state.selectedMonths,
+        allItems
+      );
       
-      console.log(`[PREDICTION] Fetching ${totalPages} pages of predictions...`);
-      
-      for (let page = 1; page <= totalPages; page++) {
-        if (controller.signal.aborted) {
-          throw new DOMException('Request was cancelled', 'AbortError');
-        }
-        
-        // Update progress
-        dispatch({
-          type: 'SET_PREDICTION_PROGRESS',
-          payload: {
-            current: (page - 1) * pageSize,
-            total: allItems.length,
-            percentage: Math.round(((page - 1) / totalPages) * 100)
-          }
-        });
-        
-        const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-previous-years?page=${page}&page_size=${pageSize}`;
-        
-        console.log(`[PREDICTION] Fetching page ${page}/${totalPages}...`);
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: allItems, target_date: state.selectedDate }),
-          signal: controller.signal
-        });
-
-        if (!response.ok) throw new Error(`Prediction failed on page ${page}: ${response.status}`);
-        
-        const result = await response.json();
-        allPredictions = allPredictions.concat(result.predictions || []);
-        
-        console.log(`[PREDICTION] Page ${page}/${totalPages} complete, total predictions: ${allPredictions.length}`);
-      }
-      
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      console.log('[PREDICTION] All pages fetched, total predictions:', allPredictions.length);
-      
-      if (allPredictions.length === 0) {
-        throw new Error('No predictions returned from server');
-      }
-      
-      console.log('[PREDICTION] Success! Dispatching results');
       dispatch({
         type: 'SET_PREDICTION_RESULTS',
-        payload: { results: allPredictions, mode: 'previous_years' }
+        payload: { results: result.predictions, mode: 'bulk_order' }
       });
-      dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showPreviousYearsModal', value: false } });
+      dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showFutureAggregateModal', value: false } });
     } catch (error) {
-      console.error('[PREDICTION] Error caught:', error.name, error.message);
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      if (error.name === 'AbortError') {
-        console.log('[PREDICTION] Request was aborted');
-        alert('Prediction was cancelled.');
-      } else {
-        alert('Prediction failed: ' + error.message);
-      }
+      if (error.name !== 'AbortError') alert('Prediction failed: ' + error.message);
     } finally {
-      console.log('[PREDICTION] Cleaning up, setting loading to false');
       dispatch({ type: 'SET_PREDICTION_LOADING', payload: false });
-      dispatch({ type: 'SET_PREDICTION_PROGRESS', payload: null });
       abortControllerRef.current = null;
     }
-  }, [state.predictions, state.selectedDate, state.hasMore, state.predictionDate, state.predictionLoading]);
-
-  // Last N Months Prediction
-  const handlePredictLastNMonths = useCallback(async () => {
-    // Prevent double-clicks
-    if (state.predictionLoading) {
-      console.log('[PREDICTION] Already loading, ignoring click');
-      return;
-    }
-    
-    dispatch({ type: 'SET_PREDICTION_LOADING', payload: true });
-    
-    // Create NEW abort controller for this request
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    
-    let timeoutId = null;
-    
-    try {
-      // Fetch ALL items first if not all loaded
-      let allItems = state.predictions.map(d => d.item_name);
-      
-      if (state.hasMore) {
-        console.log('[PREDICTION] Fetching all items for prediction...');
-        const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-paginated?page=1&page_size=10000`;
-        
-        const controller1 = new AbortController();
-        const timeoutId1 = setTimeout(() => controller1.abort(), 600000); // 10 minutes
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ prediction_date: state.predictionDate }),
-          signal: controller1.signal
-        });
-        
-        clearTimeout(timeoutId1);
-        
-        if (!response.ok) throw new Error(`Failed to fetch items: ${response.status}`);
-        
-        const result = await response.json();
-        allItems = (result.predictions || []).map(p => p.item_name);
-        console.log('[PREDICTION] Fetched all items:', allItems.length);
-      }
-
-      // Fetch predictions in pages of 50 items
-      const pageSize = 50;
-      const totalPages = Math.ceil(allItems.length / pageSize);
-      let allPredictions = [];
-      
-      console.log(`[PREDICTION] Fetching ${totalPages} pages of predictions...`);
-      
-      for (let page = 1; page <= totalPages; page++) {
-        if (controller.signal.aborted) {
-          throw new DOMException('Request was cancelled', 'AbortError');
-        }
-        
-        // Update progress
-        dispatch({
-          type: 'SET_PREDICTION_PROGRESS',
-          payload: {
-            current: (page - 1) * pageSize,
-            total: allItems.length,
-            percentage: Math.round(((page - 1) / totalPages) * 100)
-          }
-        });
-        
-        const url = `${window.location.port === '5016' ? '/api' : 'http://localhost:8001'}/predict-last-n-months?page=${page}&page_size=${pageSize}`;
-        
-        console.log(`[PREDICTION] Fetching page ${page}/${totalPages}...`);
-        
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ items: allItems, n_months: state.selectedMonths }),
-          signal: controller.signal
-        });
-
-        if (!response.ok) throw new Error(`Prediction failed on page ${page}: ${response.status}`);
-        
-        const result = await response.json();
-        allPredictions = allPredictions.concat(result.predictions || []);
-        
-        console.log(`[PREDICTION] Page ${page}/${totalPages} complete, total predictions: ${allPredictions.length}`);
-      }
-      
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      console.log('[PREDICTION] All pages fetched, total predictions:', allPredictions.length);
-      
-      if (allPredictions.length === 0) {
-        throw new Error('No predictions returned from server');
-      }
-      
-      console.log('[PREDICTION] Success! Dispatching results');
-      dispatch({
-        type: 'SET_PREDICTION_RESULTS',
-        payload: { results: allPredictions, mode: 'last_n_months' }
-      });
-      dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showLastNMonthsModal', value: false } });
-    } catch (error) {
-      console.error('[PREDICTION] Error caught:', error.name, error.message);
-      if (timeoutId) clearTimeout(timeoutId);
-      
-      if (error.name === 'AbortError') {
-        console.log('[PREDICTION] Request was aborted');
-        alert('Prediction was cancelled.');
-      } else {
-        alert('Prediction failed: ' + error.message);
-      }
-    } finally {
-      console.log('[PREDICTION] Cleaning up, setting loading to false');
-      dispatch({ type: 'SET_PREDICTION_LOADING', payload: false });
-      dispatch({ type: 'SET_PREDICTION_PROGRESS', payload: null });
-      abortControllerRef.current = null;
-    }
-  }, [state.predictions, state.selectedMonths, state.hasMore, state.predictionDate, state.predictionLoading]);
-
-  // Export prediction results
-  const exportPredictionResults = useCallback(() => {
-    if (filteredPredictionResults.length === 0) {
-      alert('No prediction results to export');
-      return;
-    }
-
-    const timestamp = new Date().toISOString().split('T')[0];
-    const rows = [];
-
-    rows.push(['Prediction Report', state.predictionMode === 'previous_years' ? 'Previous Years Analysis' : `Last ${state.selectedMonths} Months Analysis`]);
-    rows.push(['Generated', new Date().toLocaleString()]);
-    rows.push([]);
-
-    if (state.predictionMode === 'previous_years') {
-      rows.push(['Item Name', 'Year', 'Month', 'Units', 'Sales', 'Low', 'High', 'Average', 'Trend', 'Prediction', 'Confidence']);
-      
-      filteredPredictionResults.forEach(pred => {
-        rows.push([
-          pred.item_name, '', '', '', '', 
-          pred.statistics?.low_sales || 0,
-          pred.statistics?.high_sales || 0,
-          pred.statistics?.average_sales || 0,
-          pred.statistics?.trend || 'N/A',
-          pred.prediction || 0,
-          `${(pred.confidence * 100).toFixed(1)}%`
-        ]);
-
-        if (pred.yearly_data) {
-          pred.yearly_data.forEach(year => {
-            rows.push(['', year.year, year.month, year.units, year.sales, '', '', '', '', '', '']);
-          });
-        }
-        rows.push([]);
-      });
-    } else {
-      rows.push(['Item Name', 'Date', 'Year', 'Month', 'Units', 'Sales', 'Low', 'High', 'Average', 'Trend', 'Prediction', 'Confidence']);
-      
-      filteredPredictionResults.forEach(pred => {
-        rows.push([
-          pred.item_name, '', '', '', '', '', 
-          pred.statistics?.low_sales || 0,
-          pred.statistics?.high_sales || 0,
-          pred.statistics?.average_sales || 0,
-          pred.statistics?.trend || 'N/A',
-          pred.prediction || 0,
-          `${(pred.confidence * 100).toFixed(1)}%`
-        ]);
-
-        if (pred.monthly_data) {
-          pred.monthly_data.forEach(month => {
-            rows.push(['', month.date, month.year, month.month, month.units, month.sales, '', '', '', '', '', '']);
-          });
-        }
-        rows.push([]);
-      });
-    }
-
-    const csv = rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = `prediction-report-${state.predictionMode}-${timestamp}.csv`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }, [filteredPredictionResults, state.predictionMode, state.selectedMonths]);
+  }, [state.predictions, state.selectedMonths, state.hasMore, state.predictionDate]);
 
   // Paginated prediction results with frontend filtering
   const filteredPredictionResults = useMemo(() => {
@@ -748,6 +446,86 @@ const BulkPrediction = () => {
     return paginatedResults.length < filteredPredictionResults.length;
   }, [paginatedResults.length, filteredPredictionResults.length]);
 
+  // Export prediction results
+  const exportPredictionResults = useCallback(() => {
+    if (filteredPredictionResults.length === 0) {
+      alert('No prediction results to export');
+      return;
+    }
+
+    const timestamp = new Date().toISOString().split('T')[0];
+    const rows = [];
+
+    rows.push(['Bulk Order Forecast Report', `Next ${state.selectedMonths} Months Aggregate`]);
+    rows.push(['Generated', new Date().toLocaleString()]);
+    rows.push(['Prediction Date', state.predictionDate]);
+    rows.push([]);
+
+    rows.push([
+      'Item Name', 
+      'Category', 
+      'Aggregate Demand (Units)', 
+      'Purchase Price (₹)', 
+      'Sales Price (₹)', 
+      'Total Order Cost (₹)', 
+      'Total Expected Revenue (₹)', 
+      'Total Expected Profit (₹)', 
+      'Profit Margin (%)', 
+      'Recommended Order', 
+      'Confidence'
+    ]);
+    
+    let totalDemand = 0;
+    let totalOrderCost = 0;
+    let totalExpectedRevenue = 0;
+    let totalExpectedProfit = 0;
+
+    filteredPredictionResults.forEach(pred => {
+      const demand = Math.round(pred.final_prediction || pred.prediction || 0);
+      const salesPrice = pred.price || 0;
+      const purchasePrice = pred.purchase_price || 0;
+      
+      const orderCost = demand * purchasePrice;
+      const expectedRevenue = demand * salesPrice;
+      const expectedProfit = expectedRevenue - orderCost;
+      const profitMargin = purchasePrice > 0 ? ((salesPrice - purchasePrice) / purchasePrice) * 100 : 0;
+
+      totalDemand += demand;
+      totalOrderCost += orderCost;
+      totalExpectedRevenue += expectedRevenue;
+      totalExpectedProfit += expectedProfit;
+
+      rows.push([
+        pred.item_name,
+        pred.category || 'N/A',
+        demand,
+        purchasePrice.toFixed(2),
+        salesPrice.toFixed(2),
+        orderCost.toFixed(2),
+        expectedRevenue.toFixed(2),
+        expectedProfit.toFixed(2),
+        `${profitMargin.toFixed(2)}%`,
+        pred.recommended_order || demand,
+        `${((pred.confidence || 0) * 100).toFixed(1)}%`
+      ]);
+    });
+
+    rows.push([]);
+    rows.push(['TOTAL', '', totalDemand, '', '', totalOrderCost.toFixed(2), totalExpectedRevenue.toFixed(2), totalExpectedProfit.toFixed(2), '', '', '']);
+
+    const csv = rows.map(row => row.map(cell => `"${cell}"`).join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.setAttribute('href', url);
+    link.setAttribute('download', `bulk_order_forecast_${state.selectedMonths}m_${timestamp}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  }, [filteredPredictionResults, state.selectedMonths, state.predictionDate]);
+
   const handleLoadMoreResults = useCallback(() => {
     dispatch({ type: 'LOAD_MORE_RESULTS' });
   }, []);
@@ -776,7 +554,7 @@ const BulkPrediction = () => {
         </div>
       )}
 
-      <SummaryCards summary={summary} loading={state.loading} />
+      {summary && <SummaryCards summary={summary} loading={state.loading} />}
 
       <FiltersBar
         filters={state.filters}
@@ -795,132 +573,69 @@ const BulkPrediction = () => {
       {!state.predictionMode && (
         <div className="prediction-actions">
           <button 
-            className="prediction-btn previous-years-btn"
-            onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showPreviousYearsModal', value: true } })}
+            className="prediction-btn aggregate-btn"
+            style={{ 
+              background: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
+              padding: '1.25rem 2rem',
+              fontSize: '1.25rem',
+              borderRadius: '12px',
+              boxShadow: '0 10px 15px -3px rgba(99, 102, 241, 0.3)'
+            }}
+            onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showFutureAggregateModal', value: true } })}
             disabled={state.predictions.length === 0}
           >
-            📅 Predict Previous Years
-          </button>
-          <button 
-            className="prediction-btn last-n-months-btn"
-            onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showLastNMonthsModal', value: true } })}
-            disabled={state.predictions.length === 0}
-          >
-            📊 Predict Last N Months
+            🚀 Bulk Order Forecast (Next {state.selectedMonths} Months)
           </button>
         </div>
       )}
 
-      {/* Previous Years Modal */}
-      {state.showPreviousYearsModal && (
-        <div className="modal-overlay" onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showPreviousYearsModal', value: false } })}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h2>📅 Predict Based on Previous Years</h2>
-            <p>Select a target date to analyze the same month across all available years</p>
+      {state.showFutureAggregateModal && (
+        <div className="modal-overlay" onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showFutureAggregateModal', value: false } })}>
+          <div className="modal-content" style={{ maxWidth: '450px' }} onClick={(e) => e.stopPropagation()}>
+            <h2 style={{ fontSize: '1.75rem', marginBottom: '0.5rem' }}>🚀 Bulk Order Planning</h2>
+            <p style={{ color: '#94a3b8', marginBottom: '1.5rem' }}>Generate aggregate demand for multiple future months to streamline bulk procurement.</p>
+            
             <div className="modal-input-group">
-              <label htmlFor="target-date">Target Date:</label>
-              <input
-                id="target-date"
-                type="date"
-                value={state.selectedDate}
-                onChange={(e) => dispatch({ type: 'SET_SELECTED_DATE', payload: e.target.value })}
-                className="date-input"
-                disabled={state.predictionLoading}
-              />
-            </div>
-            <div className="modal-actions">
-              <button 
-                className="btn-primary"
-                onClick={handlePredictPreviousYears}
-                disabled={state.predictionLoading}
-              >
-                {state.predictionLoading ? (
-                  state.predictionProgress ? (
-                    `⏳ Processing ${state.predictionProgress.current}/${state.predictionProgress.total} (${state.predictionProgress.percentage}%)`
-                  ) : (
-                    '⏳ Generating...'
-                  )
-                ) : (
-                  '✨ Generate Prediction'
-                )}
-              </button>
-              <button 
-                className="btn-secondary"
-                onClick={() => {
-                  if (abortControllerRef.current) {
-                    abortControllerRef.current.abort();
-                  }
-                  dispatch({ type: 'SET_PREDICTION_LOADING', payload: false });
-                  dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showPreviousYearsModal', value: false } });
-                }}
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Last N Months Modal */}
-      {state.showLastNMonthsModal && (
-        <div className="modal-overlay" onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showLastNMonthsModal', value: false } })}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <h2>📊 Predict Based on Last N Months</h2>
-            <p>Select how many recent months to analyze for trend prediction</p>
-            <div className="modal-input-group">
-              <label htmlFor="months-count">Number of Months:</label>
+              <label htmlFor="months-count">Aggregate Period (Months):</label>
               <div className="month-spinner">
                 <button 
                   className="spinner-btn"
                   onClick={() => dispatch({ type: 'SET_SELECTED_MONTHS', payload: Math.max(1, state.selectedMonths - 1) })}
                   disabled={state.predictionLoading}
-                >
-                  −
+                >−
                 </button>
                 <input
                   id="months-count"
                   type="number"
                   min="1"
-                  max="24"
+                  max="12"
                   value={state.selectedMonths}
-                  onChange={(e) => dispatch({ type: 'SET_SELECTED_MONTHS', payload: Math.min(24, Math.max(1, parseInt(e.target.value) || 1)) })}
+                  onChange={(e) => dispatch({ type: 'SET_SELECTED_MONTHS', payload: Math.min(12, Math.max(1, parseInt(e.target.value) || 1)) })}
                   className="month-input"
                   disabled={state.predictionLoading}
                 />
                 <button 
                   className="spinner-btn"
-                  onClick={() => dispatch({ type: 'SET_SELECTED_MONTHS', payload: Math.min(24, state.selectedMonths + 1) })}
+                  onClick={() => dispatch({ type: 'SET_SELECTED_MONTHS', payload: Math.min(12, state.selectedMonths + 1) })}
                   disabled={state.predictionLoading}
-                >
-                  +
+                >+
                 </button>
               </div>
             </div>
-            <div className="modal-actions">
+            
+            <div className="modal-actions" style={{ marginTop: '2rem' }}>
               <button 
                 className="btn-primary"
-                onClick={handlePredictLastNMonths}
+                onClick={handlePredictFutureAggregate}
                 disabled={state.predictionLoading}
+                style={{ flex: 2 }}
               >
-                {state.predictionLoading ? (
-                  state.predictionProgress ? (
-                    `⏳ Processing ${state.predictionProgress.current}/${state.predictionProgress.total} (${state.predictionProgress.percentage}%)`
-                  ) : (
-                    '⏳ Generating...'
-                  )
-                ) : (
-                  '✨ Generate Prediction'
-                )}
+                {state.predictionLoading ? '⏳ Generating Bulk Plan...' : '✨ Generate Forecast'}
               </button>
               <button 
                 className="btn-secondary"
-                onClick={() => {
-                  if (abortControllerRef.current) {
-                    abortControllerRef.current.abort();
-                  }
-                  dispatch({ type: 'SET_PREDICTION_LOADING', payload: false });
-                  dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showLastNMonthsModal', value: false } });
-                }}
+                onClick={() => dispatch({ type: 'TOGGLE_MODAL', payload: { key: 'showFutureAggregateModal', value: false } })}
+                style={{ flex: 1 }}
               >
                 Cancel
               </button>
@@ -934,9 +649,7 @@ const BulkPrediction = () => {
         <div className="prediction-results-section">
           <div className="results-header">
             <h2>
-              {state.predictionMode === 'previous_years' 
-                ? `📅 Previous Years Analysis (${state.selectedDate})` 
-                : `📊 Last ${state.selectedMonths} Months Analysis`}
+              🚀 Bulk Order Forecast (Next {state.selectedMonths} Months)
             </h2>
             <div className="results-actions">
               <button className="btn-export" onClick={exportPredictionResults}>
@@ -958,17 +671,24 @@ const BulkPrediction = () => {
                 <tr>
                   <th></th>
                   <th>Product Name</th>
-                  <th>Low Sales</th>
-                  <th>High Sales</th>
-                  <th>Average Sales</th>
-                  <th>Trend</th>
-                  <th>Prediction</th>
+                  <th>Category</th>
+                  <th>Aggregate Demand</th>
+                  <th>Unit Price (₹)</th>
+                  <th>Total Cost (₹)</th>
+                  <th>Order Qty</th>
                   <th>Confidence</th>
-                  <th>Details</th>
                 </tr>
               </thead>
               <tbody>
-                {paginatedResults.map((pred, idx) => (
+                {paginatedResults.map((pred, idx) => {
+                  const demand = Math.round(pred.final_prediction || pred.prediction || 0);
+                  const salesPrice = pred.price || 0;
+                  const purchasePrice = pred.purchase_price || 0;
+                  const orderCost = demand * purchasePrice;
+                  const expectedRevenue = demand * salesPrice;
+                  const expectedProfit = expectedRevenue - orderCost;
+                  const profitMargin = purchasePrice > 0 ? ((salesPrice - purchasePrice) / purchasePrice) * 100 : 0;
+                  return (
                   <React.Fragment key={idx}>
                     <tr className={state.expandedResultId === pred.item_name ? 'expanded' : ''}>
                       <td>
@@ -980,234 +700,92 @@ const BulkPrediction = () => {
                         </button>
                       </td>
                       <td className="item-name-cell">{pred.item_name}</td>
-                      <td>{pred.statistics?.low_sales?.toFixed(2) || 'N/A'}</td>
-                      <td>{pred.statistics?.high_sales?.toFixed(2) || 'N/A'}</td>
-                      <td>{pred.statistics?.average_sales?.toFixed(2) || 'N/A'}</td>
+                      <td><span className="category-badge">{pred.category || 'N/A'}</span></td>
+                      <td className="prediction-cell" style={{ fontWeight: 'bold', fontSize: '1.1rem' }}>{demand.toLocaleString('en-IN')} units</td>
+                      <td>₹{salesPrice.toFixed(2)}</td>
+                      <td style={{ fontWeight: 'bold', color: '#10b981' }}>₹{Math.round(orderCost).toLocaleString('en-IN')}</td>
+                      <td>{(pred.recommended_order || demand).toLocaleString('en-IN')}</td>
                       <td>
-                        <span className={`trend-badge ${pred.statistics?.trend || 'stable'}`}>
-                          {pred.statistics?.trend || 'N/A'}
-                        </span>
-                      </td>
-                      <td className="prediction-cell">{pred.prediction?.toFixed(2) || 'N/A'}</td>
-                      <td>
-                        <span className="confidence-badge">
+                        <span className={`confidence-badge ${pred.confidence > 0.7 ? 'high' : pred.confidence > 0.5 ? 'medium' : 'low'}`}>
                           {((pred.confidence || 0) * 100).toFixed(1)}%
                         </span>
-                      </td>
-                      <td>
-                        <button 
-                          className="view-details-btn"
-                          onClick={() => dispatch({ type: 'TOGGLE_RESULT_EXPAND', payload: pred.item_name })}
-                        >
-                          {state.expandedResultId === pred.item_name ? 'Hide' : 'View'}
-                        </button>
                       </td>
                     </tr>
                     {state.expandedResultId === pred.item_name && (
                       <tr className="expanded-row">
-                        <td colSpan="9">
+                        <td colSpan="8">
                           <div className="prediction-details-panel">
-                            <h3>📊 {pred.item_name} - Detailed Analysis</h3>
+                            <h3>📊 {pred.item_name} - Bulk Order Summary</h3>
                             
-                            {/* Statistics Summary */}
                             <div className="stats-summary">
                               <div className="stat-card">
-                                <div className="stat-label">Low Sales</div>
-                                <div className="stat-value">{pred.statistics?.low_sales?.toFixed(2) || 'N/A'}</div>
+                                <div className="stat-label">Months Covered</div>
+                                <div className="stat-value">{pred.n_months || state.selectedMonths}</div>
                               </div>
                               <div className="stat-card">
-                                <div className="stat-label">High Sales</div>
-                                <div className="stat-value">{pred.statistics?.high_sales?.toFixed(2) || 'N/A'}</div>
+                                <div className="stat-label">Total Demand</div>
+                                <div className="stat-value">{demand.toLocaleString('en-IN')} units</div>
                               </div>
                               <div className="stat-card">
-                                <div className="stat-label">Average Sales</div>
-                                <div className="stat-value">{pred.statistics?.average_sales?.toFixed(2) || 'N/A'}</div>
+                                <div className="stat-label">Avg/Month</div>
+                                <div className="stat-value">{Math.round(demand / (pred.n_months || state.selectedMonths)).toLocaleString('en-IN')} units</div>
                               </div>
                               <div className="stat-card">
-                                <div className="stat-label">Median Sales</div>
-                                <div className="stat-value">{pred.statistics?.median_sales?.toFixed(2) || 'N/A'}</div>
+                                <div className="stat-label">Total Order Cost</div>
+                                <div className="stat-value">₹{Math.round(orderCost).toLocaleString('en-IN')}</div>
                               </div>
                               <div className="stat-card">
-                                <div className="stat-label">Std Deviation</div>
-                                <div className="stat-value">{pred.statistics?.std_dev?.toFixed(2) || 'N/A'}</div>
+                                <div className="stat-label">Total Revenue</div>
+                                <div className="stat-value" style={{ color: '#3b82f6' }}>₹{Math.round(expectedRevenue).toLocaleString('en-IN')}</div>
                               </div>
                               <div className="stat-card">
-                                <div className="stat-label">Trend</div>
+                                <div className="stat-label">Expected Profit</div>
+                                <div className="stat-value" style={{ color: '#10b981' }}>₹{Math.round(expectedProfit).toLocaleString('en-IN')}</div>
+                              </div>
+                              <div className="stat-card">
+                                <div className="stat-label">Profit Margin</div>
+                                <div className="stat-value">{profitMargin.toFixed(1)}%</div>
+                              </div>
+                              <div className="stat-card">
+                                <div className="stat-label">Sales Price</div>
+                                <div className="stat-value">₹{salesPrice.toFixed(2)}</div>
+                              </div>
+                              <div className="stat-card">
+                                <div className="stat-label">Purchase Price</div>
+                                <div className="stat-value">₹{purchasePrice.toFixed(2)}</div>
+                              </div>
+                              <div className="stat-card">
+                                <div className="stat-label">Confidence</div>
                                 <div className="stat-value">
-                                  <span className={`trend-badge ${pred.statistics?.trend || 'stable'}`}>
-                                    {pred.statistics?.trend || 'N/A'}
+                                  <span className={`confidence-badge ${pred.confidence > 0.7 ? 'high' : 'medium'}`}>
+                                    {((pred.confidence || 0) * 100).toFixed(1)}%
                                   </span>
-                                </div>
-                              </div>
-                              <div className="stat-card">
-                                <div className="stat-label">Total Units</div>
-                                <div className="stat-value">
-                                  {state.predictionMode === 'previous_years' 
-                                    ? (pred.yearly_data?.reduce((sum, y) => sum + (y.units || 0), 0) || 'N/A')
-                                    : (pred.monthly_data?.reduce((sum, m) => sum + (m.units || 0), 0) || 'N/A')}
-                                </div>
-                              </div>
-                              <div className="stat-card">
-                                <div className="stat-label">Avg Units/Period</div>
-                                <div className="stat-value">
-                                  {state.predictionMode === 'previous_years' 
-                                    ? (pred.yearly_data?.length > 0 
-                                        ? Math.round(pred.yearly_data.reduce((sum, y) => sum + (y.units || 0), 0) / pred.yearly_data.length)
-                                        : 'N/A')
-                                    : (pred.monthly_data?.length > 0 
-                                        ? Math.round(pred.monthly_data.reduce((sum, m) => sum + (m.units || 0), 0) / pred.monthly_data.length)
-                                        : 'N/A')}
                                 </div>
                               </div>
                             </div>
 
-                            {/* Confidence Analysis */}
                             <div className="confidence-analysis">
-                              <h4>🎯 Confidence Analysis</h4>
+                              <h4>🎯 Forecast Analysis</h4>
                               <div className="confidence-details">
-                                <div className="confidence-score">
-                                  <span className="confidence-label">Confidence Score:</span>
-                                  <span className={`confidence-value ${pred.confidence > 0.8 ? 'high' : pred.confidence > 0.6 ? 'medium' : 'low'}`}>
-                                    {((pred.confidence || 0) * 100).toFixed(1)}%
-                                  </span>
-                                </div>
                                 <div className="confidence-explanation">
-                                  {pred.confidence > 0.8 ? (
-                                    <p>✅ <strong>High Confidence:</strong> Data is consistent with low variation. Predictions are reliable.</p>
-                                  ) : pred.confidence > 0.6 ? (
-                                    <p>⚠️ <strong>Medium Confidence:</strong> Moderate variation in historical data. Predictions should be used with caution.</p>
-                                  ) : (
-                                    <p>❌ <strong>Low Confidence:</strong> High variation in historical data (CV: {pred.statistics?.std_dev && pred.statistics?.average_sales 
-                                      ? ((pred.statistics.std_dev / pred.statistics.average_sales) * 100).toFixed(1) 
-                                      : 'N/A'}%). Predictions may be unreliable.</p>
-                                  )}
-                                  <p className="confidence-note">
-                                    <strong>Why?</strong> Confidence = 1 - (Std Dev / Average). 
-                                    {pred.statistics?.std_dev && pred.statistics?.average_sales ? (
-                                      ` Current: 1 - (${pred.statistics.std_dev.toFixed(2)} / ${pred.statistics.average_sales.toFixed(2)}) = ${pred.confidence.toFixed(3)}`
-                                    ) : ' Insufficient data for calculation.'}
-                                  </p>
+                                  <p>📦 <strong>Bulk Order:</strong> Stock {demand.toLocaleString('en-IN')} units of {pred.item_name} to cover demand for the next {pred.n_months || state.selectedMonths} months.</p>
+                                  <p>💰 <strong>Budget Required:</strong> ₹{Math.round(orderCost).toLocaleString('en-IN')} at ₹{purchasePrice.toFixed(2)}/unit.</p>
+                                  <p>📈 <strong>Expected Profit:</strong> ₹{Math.round(expectedProfit).toLocaleString('en-IN')} ({profitMargin.toFixed(1)}% margin).</p>
                                   {pred.confidence < 0.7 && (
                                     <p className="confidence-recommendation">
-                                      💡 <strong>Recommendation:</strong> Consider collecting more data or investigating factors causing high variation (seasonality, promotions, supply issues).
+                                      💡 <strong>Note:</strong> Confidence is below 70% — consider ordering 10-15% extra as buffer.
                                     </p>
                                   )}
                                 </div>
                               </div>
                             </div>
-
-                            {/* Data Table */}
-                            {state.predictionMode === 'previous_years' && pred.yearly_data && (
-                              <div className="data-breakdown">
-                                <h4>📅 Yearly Breakdown</h4>
-                                <div className="breakdown-table-container">
-                                  <table className="breakdown-table">
-                                    <thead>
-                                      <tr>
-                                        <th>Year</th>
-                                        <th>Month</th>
-                                        <th>Units Sold</th>
-                                        <th>Sales Amount</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {pred.yearly_data.map((year, i) => (
-                                        <tr key={i}>
-                                          <td>{year.year}</td>
-                                          <td>{year.month}</td>
-                                          <td>{year.units}</td>
-                                          <td>{year.sales?.toFixed(2)}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-
-                                {/* Simple Bar Chart */}
-                                <div className="simple-chart">
-                                  <h4>Sales by Year</h4>
-                                  <div className="chart-bars">
-                                    {pred.yearly_data.map((year, i) => {
-                                      const maxSales = Math.max(...pred.yearly_data.map(y => y.sales));
-                                      const percentage = (year.sales / maxSales) * 100;
-                                      return (
-                                        <div key={i} className="chart-bar-item">
-                                          <div className="chart-bar-label">{year.year}</div>
-                                          <div className="chart-bar-container">
-                                            <div 
-                                              className="chart-bar-fill" 
-                                              style={{ width: `${percentage}%` }}
-                                            >
-                                              <span className="chart-bar-value">{year.sales?.toFixed(0)}</span>
-                                            </div>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              </div>
-                            )}
-
-                            {state.predictionMode === 'last_n_months' && pred.monthly_data && (
-                              <div className="data-breakdown">
-                                <h4>📊 Monthly Breakdown (Last {state.selectedMonths} Months)</h4>
-                                <div className="breakdown-table-container">
-                                  <table className="breakdown-table">
-                                    <thead>
-                                      <tr>
-                                        <th>Date</th>
-                                        <th>Year</th>
-                                        <th>Month</th>
-                                        <th>Units Sold</th>
-                                        <th>Sales Amount</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody>
-                                      {pred.monthly_data.map((month, i) => (
-                                        <tr key={i}>
-                                          <td>{month.date}</td>
-                                          <td>{month.year}</td>
-                                          <td>{month.month}</td>
-                                          <td>{month.units}</td>
-                                          <td>{month.sales?.toFixed(2)}</td>
-                                        </tr>
-                                      ))}
-                                    </tbody>
-                                  </table>
-                                </div>
-
-                                {/* Simple Line Chart */}
-                                <div className="simple-chart">
-                                  <h4>Sales Trend</h4>
-                                  <div className="chart-bars">
-                                    {pred.monthly_data.map((month, i) => {
-                                      const maxSales = Math.max(...pred.monthly_data.map(m => m.sales));
-                                      const percentage = (month.sales / maxSales) * 100;
-                                      return (
-                                        <div key={i} className="chart-bar-item">
-                                          <div className="chart-bar-label">{month.month}/{month.year}</div>
-                                          <div className="chart-bar-container">
-                                            <div 
-                                              className="chart-bar-fill" 
-                                              style={{ width: `${percentage}%` }}
-                                            >
-                                              <span className="chart-bar-value">{month.sales?.toFixed(0)}</span>
-                                            </div>
-                                          </div>
-                                        </div>
-                                      );
-                                    })}
-                                  </div>
-                                </div>
-                              </div>
-                            )}
                           </div>
                         </td>
                       </tr>
                     )}
                   </React.Fragment>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
