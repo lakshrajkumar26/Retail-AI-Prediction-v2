@@ -60,12 +60,12 @@ const SummaryCards = ({ summary, loading }) => {
       </div>
 
       <div className="summary-card">
-        <div className="card-icon">🎯</div>
+        <div className="card-icon">💰</div>
         <div className="card-content">
-          <div className="card-label">Avg Confidence</div>
-          <div className="card-value">{(summary.avgConfidence * 100).toFixed(1)}%</div>
+          <div className="card-label">Est. Order Value</div>
+          <div className="card-value">₹{Math.round(summary.totalOrderValue).toLocaleString()}</div>
           <div className="card-detail">
-            Order Value: ₹{summary.totalOrderValue.toLocaleString()}
+            {summary.totalItems} items to restock
           </div>
         </div>
       </div>

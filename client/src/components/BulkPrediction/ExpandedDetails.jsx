@@ -23,6 +23,8 @@ const ChartBox = ({ height = 240, children }) => {
 const ExpandedDetails = ({ product, predictionDate }) => {
   const monthName = new Date(predictionDate).toLocaleDateString('en-US', { month: 'long', year: 'numeric' });
   const shortMonth = new Date(predictionDate).toLocaleDateString('en-US', { month: 'long' });
+  // Target month number (1-based) derived from the prediction date
+  const targetMonth = new Date(predictionDate).getMonth() + 1;
 
   // Build chart data from all_monthly_data — newest first, take 12, reverse for chronological
   const monthlyData = React.useMemo(() => {
@@ -36,6 +38,27 @@ const ExpandedDetails = ({ product, predictionDate }) => {
         sales: Math.round(d.sales || 0),
       }));
   }, [product.all_monthly_data]);
+
+  // Compute stats ONLY for the target month across all years
+  const monthStats = React.useMemo(() => {
+    // Try: historical_stats.month_stats (built by predictionHelpers)
+    const fromHelper = product.historical_stats?.month_stats?.[String(targetMonth)];
+    if (fromHelper) return fromHelper;
+
+    // Fallback: compute from all_monthly_data filtered to targetMonth
+    const filtered = (product.all_monthly_data || []).filter(d => d.month === targetMonth);
+    if (filtered.length === 0) {
+      // Last resort: use global historical_stats if available
+      return product.historical_stats || { min: 0, max: 0, avg: 0, count: 0 };
+    }
+    const vals = filtered.map(d => d.sales || 0);
+    return {
+      min: Math.min(...vals),
+      max: Math.max(...vals),
+      avg: vals.reduce((a, b) => a + b, 0) / vals.length,
+      count: vals.length,
+    };
+  }, [product, targetMonth]);
 
   const TT = {
     contentStyle: { backgroundColor: '#0f172a', border: '1px solid #334155', borderRadius: '6px', color: '#fff', fontSize: '12px' },
@@ -52,7 +75,7 @@ const ExpandedDetails = ({ product, predictionDate }) => {
           <div className="forecast-values">
             <div className="forecast-item">
               <span className="forecast-label">Lowest {shortMonth}</span>
-              <span className="forecast-value">{Math.round(product.historical_stats?.min || 0)}</span>
+              <span className="forecast-value">{Math.round(monthStats.min || 0)}</span>
               <span className="forecast-sublabel">units (from all years)</span>
             </div>
             
@@ -64,15 +87,15 @@ const ExpandedDetails = ({ product, predictionDate }) => {
             
             <div className="forecast-item">
               <span className="forecast-label">Highest {shortMonth}</span>
-              <span className="forecast-value">{Math.round(product.historical_stats?.max || 0)}</span>
+              <span className="forecast-value">{Math.round(monthStats.max || 0)}</span>
               <span className="forecast-sublabel">units (from all years)</span>
             </div>
           </div>
           
-          {product.historical_stats?.avg && (
+          {monthStats.avg > 0 && (
             <div className="historical-context">
-              <span>Historical {shortMonth} Average: <strong>{Math.round(product.historical_stats.avg)} units</strong></span>
-              <span>• Based on {product.historical_stats.count} year(s) of data</span>
+              <span>Historical {shortMonth} Average: <strong>{Math.round(monthStats.avg)} units</strong></span>
+              <span>• Based on {monthStats.count} year(s) of data</span>
             </div>
           )}
         </div>

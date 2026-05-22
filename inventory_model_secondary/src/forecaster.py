@@ -29,7 +29,7 @@ MODEL_FEATURES = [
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 MODEL_PATH = BASE_DIR / "model" / "xgboost_demand_model.json"
-DATA_PATH = BASE_DIR / "data" / "master_training_data.csv"
+DB_PATH = BASE_DIR / "converted_dataset" / "inventory_sales.db"
 
 
 class DemandForecaster:
@@ -43,24 +43,35 @@ class DemandForecaster:
         self._load()
 
     def _load(self):
-        """Load model and data into memory."""
+        """Load model and data into memory from SQLite database."""
         print(f"[FORECASTER] Loading model from {MODEL_PATH}...")
         if not MODEL_PATH.exists():
             raise FileNotFoundError(f"Model not found: {MODEL_PATH}")
         self.model = xgb.XGBRegressor()
         self.model.load_model(str(MODEL_PATH))
 
-        print(f"[FORECASTER] Loading data from {DATA_PATH}...")
-        if not DATA_PATH.exists():
-            raise FileNotFoundError(f"Data not found: {DATA_PATH}")
-        self.df = pd.read_csv(str(DATA_PATH))
+        print(f"[FORECASTER] Loading data from SQLite database: {DB_PATH}...")
+        import sqlite3
+        conn = sqlite3.connect(str(DB_PATH))
+        try:
+            self.df = pd.read_sql_query("SELECT * FROM master_training_data", conn)
+        except Exception as e:
+            conn.close()
+            raise FileNotFoundError(f"Could not load master_training_data table from SQLite: {e}")
+        finally:
+            conn.close()
+
         self.df['Date'] = pd.to_datetime(self.df['Date'])
         self.df = self.df.sort_values(by=['Date', 'Item_ID']).reset_index(drop=True)
         print(f"[FORECASTER] Loaded {len(self.df)} records for {self.df['Item_ID'].nunique()} items.")
 
     def reload_data(self):
-        """Reload data from disk (after an upload, for example)."""
+        """Reload data from the SQLite database."""
         self._load()
+        # Clear prediction cache so re-computed closing stocks take effect immediately
+        self._prediction_cache = {}
+        print("[FORECASTER] Prediction cache cleared after data reload.")
+
 
     def get_item_list(self):
         """Return unique items with their metadata."""
@@ -93,16 +104,24 @@ class DemandForecaster:
             net_qty = float(row['Net_Qty']) if pd.notna(row['Net_Qty']) else 0
             if year not in result:
                 result[year] = {}
-            result[year][month] = net_qty
+            result[year][month] = result[year].get(month, 0.0) + net_qty
         return result
 
     def get_last_n_months_data(self, item_name, n_months=4):
         """Get the last N months of actual sales for an item."""
-        item_df = self.df[self.df['Item_Name'] == item_name].sort_values('Date')
+        item_df = self.df[self.df['Item_Name'] == item_name]
         if item_df.empty:
             return []
 
-        recent = item_df.tail(n_months)
+        # Group by Year and Month to aggregate duplicate rows
+        grouped = item_df.groupby(['Year', 'Month']).agg({
+            'Net_Qty': 'sum',
+            'Date': 'max',
+            'R_Rate': 'first',
+            'W_Rate': 'first'
+        }).reset_index().sort_values('Date')
+
+        recent = grouped.tail(n_months)
         months_data = []
         for _, row in recent.iterrows():
             months_data.append({
@@ -115,19 +134,7 @@ class DemandForecaster:
             })
         return months_data
 
-    def compute_confidence(self, item_name):
-        """
-        Compute confidence score for an item based on historical variance.
-        Formula: max(0.5, 1 - StdDev / Mean)
-
-        BIAS NOTE: Items with consistently low sales (mean near 0) will get
-        artificially low or capped confidence because the ratio explodes.
-        """
-        item_df = self.df[self.df['Item_Name'] == item_name]
-        sales = item_df['Net_Qty'].dropna()
-
-        # Hardcoded to 0.8 (80%) as per user request
-        return 0.8
+    # compute_confidence removed — confidence scores are not exposed in the API.
 
     def compute_trend(self, item_name):
         """
@@ -200,6 +207,81 @@ class DemandForecaster:
         X = temp.reindex(columns=MODEL_FEATURES, fill_value=0)
         return X
 
+    def _precompute_metrics(self):
+        """
+        Pre-compute historical metrics for speed.
+        Returns (year_totals_dict, historical_dict, last_3_dict, trend_dict).
+        """
+        print("[FORECASTER] Pre-computing historical metrics for speed...")
+        
+        # 1. Year Totals
+        year_totals_df = self.df.groupby(['Item_Name', 'Year'])['Net_Qty'].sum().reset_index()
+        year_totals_dict = {}
+        for r in year_totals_df.itertuples(index=False):
+            item_name = r.Item_Name
+            if item_name not in year_totals_dict:
+                year_totals_dict[item_name] = {}
+            year_totals_dict[item_name][int(r.Year)] = float(r.Net_Qty)
+
+        # 2. Historical Sales & Last 3 Months & Trend
+        historical_dict = {}
+        last_3_dict = {}
+        trend_dict = {}
+        
+        # Sort values once
+        sorted_df = self.df.sort_values(['Item_Name', 'Date'])
+        
+        # Fast Historical Dict Construction
+        hist_sum = sorted_df.groupby(['Item_Name', 'Year', 'Month'])['Net_Qty'].sum().reset_index()
+        for r in hist_sum.itertuples(index=False):
+            item_name = r.Item_Name
+            yr = int(r.Year)
+            mo = int(r.Month)
+            val = float(r.Net_Qty)
+            if item_name not in historical_dict:
+                historical_dict[item_name] = {}
+            if yr not in historical_dict[item_name]:
+                historical_dict[item_name][yr] = {}
+            historical_dict[item_name][yr][mo] = val
+
+        # Fast Last 3 Months Construction
+        last_3_df = sorted_df.groupby('Item_Name').tail(3)
+        for r in last_3_df.itertuples(index=False):
+            item_name = r.Item_Name
+            dt_obj = pd.to_datetime(r.Date)
+            entry = {
+                'date': dt_obj.strftime('%Y-%m-%d'),
+                'year': int(r.Year),
+                'month': int(r.Month),
+                'month_name': dt_obj.strftime('%b %Y'),
+                'sales': float(r.Net_Qty) if pd.notna(r.Net_Qty) else 0.0,
+                'units': float(r.Net_Qty) if pd.notna(r.Net_Qty) else 0.0,
+            }
+            if item_name not in last_3_dict:
+                last_3_dict[item_name] = []
+            last_3_dict[item_name].append(entry)
+
+        # Fast Trend Calculation
+        trend_data = sorted_df.groupby('Item_Name')['Net_Qty'].apply(lambda x: x.dropna().tail(6).values).to_dict()
+        for item_name, sales in trend_data.items():
+            if len(sales) < 3:
+                trend_dict[item_name] = ('stable', 0.0)
+            else:
+                first_half = sales[:len(sales)//2].mean()
+                second_half = sales[len(sales)//2:].mean()
+                if first_half == 0:
+                    trend_dict[item_name] = ('stable', 0.0)
+                else:
+                    gr = (second_half - first_half) / first_half
+                    if gr > 0.1:
+                        trend_dict[item_name] = ('increasing', gr)
+                    elif gr < -0.1:
+                        trend_dict[item_name] = ('decreasing', gr)
+                    else:
+                        trend_dict[item_name] = ('stable', gr)
+
+        return year_totals_dict, historical_dict, last_3_dict, trend_dict
+
     def predict_single_month(self, target_month, target_year):
         """
         Predict demand for all items for a single target month/year.
@@ -269,77 +351,38 @@ class DemandForecaster:
         # Build result list
         results = []
         
-        print("[FORECASTER] Pre-computing historical metrics for speed...")
-        
-        # --- VECTORIZED PRE-COMPUTATIONS ---
-        
-        # 1. Year Totals
-        year_totals_df = self.df.groupby(['Item_Name', 'Year'])['Net_Qty'].sum().reset_index()
-        year_totals_dict = {}
-        for _, r in year_totals_df.iterrows():
-            item_name = r['Item_Name']
-            if item_name not in year_totals_dict:
-                year_totals_dict[item_name] = {}
-            year_totals_dict[item_name][int(r['Year'])] = float(r['Net_Qty'])
-
-        # 2. Historical Sales & Last 3 Months & Trend
-        historical_dict = {}
-        last_3_dict = {}
-        trend_dict = {}
-        
-        # Sort values once
+        # --- PRE-COMPUTATIONS ---
+        year_totals_dict, historical_dict, last_3_dict, trend_dict = self._precompute_metrics()
         sorted_df = self.df.sort_values(['Item_Name', 'Date'])
-        
-        # Group by Item_Name
-        for item_name, group in sorted_df.groupby('Item_Name'):
-            # Historical
-            hist = {}
-            for _, r in group.iterrows():
-                yr = int(r['Year'])
-                mo = int(r['Month'])
-                if yr not in hist: hist[yr] = {}
-                hist[yr][mo] = float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0
-            historical_dict[item_name] = hist
-            
-            # Last 3
-            recent = group.tail(3)
-            last_3 = []
-            for _, r in recent.iterrows():
-                last_3.append({
-                    'date': r['Date'].strftime('%Y-%m-%d'),
-                    'year': int(r['Year']),
-                    'month': int(r['Month']),
-                    'month_name': r['Date'].strftime('%b %Y'),
-                    'sales': float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0,
-                    'units': float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0,
-                })
-            last_3_dict[item_name] = last_3
-            
-            # Trend
-            sales = group['Net_Qty'].dropna().tail(6).values
-            if len(sales) < 3:
-                trend_dict[item_name] = ('stable', 0.0)
-            else:
-                first_half = sales[:len(sales)//2].mean()
-                second_half = sales[len(sales)//2:].mean()
-                if first_half == 0:
-                    trend_dict[item_name] = ('stable', 0.0)
-                else:
-                    gr = (second_half - first_half) / first_half
-                    if gr > 0.1:
-                        trend_dict[item_name] = ('increasing', gr)
-                    elif gr < -0.1:
-                        trend_dict[item_name] = ('decreasing', gr)
-                    else:
-                        trend_dict[item_name] = ('stable', gr)
 
-        # 3. Best Closing Stock
-        # Filter where Closing_Stock > 0, keep last
-        valid_stocks = sorted_df[sorted_df['Closing_Stock'] > 0].groupby('Item_ID').tail(1)
-        closing_stock_dict = valid_stocks.set_index('Item_ID')['Closing_Stock'].to_dict()
-        # Fallback to last known value (even if 0) if not in valid_stocks
-        last_known_stocks = sorted_df.groupby('Item_ID').tail(1).set_index('Item_ID')['Closing_Stock'].to_dict()
+        # 3. Current Stock — use absolute last known Closing_Stock or O_B from actual uploaded data
+        # Walk backwards to find the last known non-NaN Closing_Stock or O_B in the entire history.
+        # This resolves the issue where items not listed in recent months still have last known stock.
         
+        # Get absolute last non-NaN Closing_Stock row for each item in the entire dataset
+        last_valid_cs_rows = sorted_df[sorted_df['Closing_Stock'].notna()].groupby('Item_ID').tail(1).set_index('Item_ID')
+        last_known_cs = last_valid_cs_rows['Closing_Stock'].to_dict()
+
+        # Get absolute last non-NaN O_B row for each item in the entire dataset
+        last_valid_ob_rows = sorted_df[sorted_df['O_B'].notna()].groupby('Item_ID').tail(1).set_index('Item_ID')
+        last_known_ob = last_valid_ob_rows['O_B'].to_dict()
+
+        closing_stock_dict = {}
+        stock_data_known = set()
+
+        for item_id in sorted_df['Item_ID'].unique():
+            cs = last_known_cs.get(item_id)
+            if cs is not None and not pd.isna(cs):
+                closing_stock_dict[item_id] = float(cs)
+                stock_data_known.add(item_id)
+            else:
+                ob = last_known_ob.get(item_id)
+                if ob is not None and not pd.isna(ob):
+                    closing_stock_dict[item_id] = float(ob)
+                    stock_data_known.add(item_id)
+                else:
+                    closing_stock_dict[item_id] = 0.0
+
         # --- END VECTORIZED PRE-COMPUTATIONS ---
         
         for i, (_, row) in enumerate(current_df.iterrows()):
@@ -347,21 +390,25 @@ class DemandForecaster:
             item_name = row['Item_Name']
             
             # Fast lookups
-            confidence = 0.8  # Hardcoded
             trend, growth_rate = trend_dict.get(item_name, ('stable', 0.0))
             year_totals = year_totals_dict.get(item_name, {})
             historical = historical_dict.get(item_name, {})
             last_3 = last_3_dict.get(item_name, [])
             
-            # Closing stock logic
-            closing_stock = float(closing_stock_dict.get(item_id, last_known_stocks.get(item_id, 0.0)))
+            # Closing stock logic — closing_stock_dict covers all items (built above)
+            closing_stock = float(closing_stock_dict.get(item_id, 0.0))
             if pd.isna(closing_stock): closing_stock = 0.0
+            stock_known = item_id in stock_data_known
 
             prediction = float(preds[i])
 
             max_year = int(self.df["Year"].max())
             prev_year = max_year - 1
-            
+
+            # Only recommend an order when we know the stock level;
+            # if stock is unknown we leave recommended_order as the full prediction
+            recommended_order = max(0, int(round(prediction - closing_stock))) if stock_known else int(round(prediction))
+
             results.append({
                 'item_id': str(item_id),
                 'item_name': item_name,
@@ -374,8 +421,8 @@ class DemandForecaster:
                 'price': float(row['R_Rate']) if pd.notna(row['R_Rate']) else 0,
                 'purchase_price': float(row['W_Rate']) if pd.notna(row['W_Rate']) else 0,
                 'current_stock': int(closing_stock),
-                'recommended_order': max(0, int(round(prediction - closing_stock))),
-                'confidence': 0.8,
+                'stock_data_available': stock_known,
+                'recommended_order': recommended_order,
                 'trend': trend,
                 'growth_rate': round(growth_rate, 3),
                 'historical_sales': historical,
@@ -396,69 +443,23 @@ class DemandForecaster:
     def _get_actual_data_for_month(self, month, year):
         """Return actual historical data for a past month."""
         month_df = self.df[(self.df['Month'] == month) & (self.df['Year'] == year)]
-        
-        print(f"[FORECASTER] Pre-computing historical metrics for actual data (Month: {month}, Year: {year})...")
-        
-        # --- VECTORIZED PRE-COMPUTATIONS ---
-        year_totals_df = self.df.groupby(['Item_Name', 'Year'])['Net_Qty'].sum().reset_index()
-        year_totals_dict = {}
-        for _, r in year_totals_df.iterrows():
-            item_name = r['Item_Name']
-            if item_name not in year_totals_dict: year_totals_dict[item_name] = {}
-            year_totals_dict[item_name][int(r['Year'])] = float(r['Net_Qty'])
-
-        historical_dict = {}
-        last_3_dict = {}
-        trend_dict = {}
-        sorted_df = self.df.sort_values(['Item_Name', 'Date'])
-        
-        for item_name, group in sorted_df.groupby('Item_Name'):
-            hist = {}
-            for _, r in group.iterrows():
-                yr = int(r['Year'])
-                mo = int(r['Month'])
-                if yr not in hist: hist[yr] = {}
-                hist[yr][mo] = float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0
-            historical_dict[item_name] = hist
-            
-            recent = group.tail(3)
-            last_3 = []
-            for _, r in recent.iterrows():
-                last_3.append({
-                    'date': r['Date'].strftime('%Y-%m-%d'),
-                    'year': int(r['Year']),
-                    'month': int(r['Month']),
-                    'month_name': r['Date'].strftime('%b %Y'),
-                    'sales': float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0,
-                    'units': float(r['Net_Qty']) if pd.notna(r['Net_Qty']) else 0,
-                })
-            last_3_dict[item_name] = last_3
-            
-            sales = group['Net_Qty'].dropna().tail(6).values
-            if len(sales) < 3:
-                trend_dict[item_name] = ('stable', 0.0)
-            else:
-                first_half = sales[:len(sales)//2].mean()
-                second_half = sales[len(sales)//2:].mean()
-                if first_half == 0: trend_dict[item_name] = ('stable', 0.0)
-                else:
-                    gr = (second_half - first_half) / first_half
-                    if gr > 0.1: trend_dict[item_name] = ('increasing', gr)
-                    elif gr < -0.1: trend_dict[item_name] = ('decreasing', gr)
-                    else: trend_dict[item_name] = ('stable', gr)
-        # --- END VECTORIZED PRE-COMPUTATIONS ---
+        # --- PRE-COMPUTATIONS ---
+        year_totals_dict, historical_dict, last_3_dict, trend_dict = self._precompute_metrics()
         
         results = []
         for _, row in month_df.iterrows():
             item_name = row['Item_Name']
             net_qty = float(row['Net_Qty']) if pd.notna(row['Net_Qty']) else 0
             
-            confidence = 0.8
             trend, growth_rate = trend_dict.get(item_name, ('stable', 0.0))
             historical = historical_dict.get(item_name, {})
             last_3 = last_3_dict.get(item_name, [])
             year_totals = year_totals_dict.get(item_name, {})
-            closing_stock = float(row['Closing_Stock']) if pd.notna(row['Closing_Stock']) else 0
+            # Use closing_stock from this month's row; fallback to O_B when missing
+            closing_stock = float(row['Closing_Stock']) if pd.notna(row['Closing_Stock']) and float(row['Closing_Stock']) >= 0 else 0
+            if closing_stock == 0 and pd.notna(row.get('O_B')) and float(row.get('O_B', 0)) > 0:
+                closing_stock = float(row['O_B'])
+
 
             results.append({
                 'item_id': str(row['Item_ID']),
@@ -473,7 +474,6 @@ class DemandForecaster:
                 'purchase_price': float(row['W_Rate']) if pd.notna(row['W_Rate']) else 0,
                 'current_stock': int(closing_stock),
                 'recommended_order': max(0, int(round(net_qty - closing_stock))),
-                'confidence': 0.8,
                 'trend': trend,
                 'growth_rate': round(growth_rate, 3),
                 'historical_sales': historical,
@@ -567,7 +567,6 @@ class DemandForecaster:
                 'price': float(price_map.get(item_name, 0)),
                 'purchase_price': float(w_price_map.get(item_name, 0)),
                 'recommended_order': int(round(total_pred)),
-                'confidence': 0.80 - (n_months * 0.02), # Confidence decays with longer horizon
                 'is_aggregate': True,
                 'n_months': n_months,
                 'start_date': target_date.strftime('%Y-%m'),
@@ -588,14 +587,24 @@ class DemandForecaster:
             item_df = self.df[
                 (self.df['Item_Name'] == item_name) &
                 (self.df['Month'] == target_month)
-            ].sort_values('Date')
+            ]
 
             if item_df.empty:
                 continue
 
+            # Group by Year to aggregate duplicate rows in the same year/month
+            grouped = item_df.groupby('Year').agg({
+                'Net_Qty': 'sum',
+                'Month': 'first',
+                'R_Rate': 'first',
+                'W_Rate': 'first',
+                'Category': 'first',
+                'Item_ID': 'first'
+            }).reset_index().sort_values('Year')
+
             yearly_data = []
             sales_values = []
-            for _, row in item_df.iterrows():
+            for _, row in grouped.iterrows():
                 net_qty = float(row['Net_Qty']) if pd.notna(row['Net_Qty']) else 0
                 sales_values.append(net_qty)
                 yearly_data.append({
@@ -610,7 +619,6 @@ class DemandForecaster:
 
             avg_sales = np.mean(sales_values)
             std_sales = np.std(sales_values) if len(sales_values) > 1 else 0
-            confidence = max(0.5, 1.0 - (std_sales / avg_sales)) if avg_sales > 0 else 0.5
 
             # Trend from the yearly data
             if len(sales_values) >= 2:
@@ -624,13 +632,12 @@ class DemandForecaster:
                 trend = 'stable'
 
             results.append({
-                'item_id': str(item_df.iloc[-1]['Item_ID']),
+                'item_id': str(grouped.iloc[-1]['Item_ID']),
                 'item_name': item_name,
-                'category': item_df.iloc[-1]['Category'],
-                'price': float(item_df.iloc[-1]['R_Rate']) if pd.notna(item_df.iloc[-1]['R_Rate']) else 0,
-                'purchase_price': float(item_df.iloc[-1]['W_Rate']) if pd.notna(item_df.iloc[-1]['W_Rate']) else 0,
+                'category': grouped.iloc[-1]['Category'],
+                'price': float(grouped.iloc[-1]['R_Rate']) if pd.notna(grouped.iloc[-1]['R_Rate']) else 0,
+                'purchase_price': float(grouped.iloc[-1]['W_Rate']) if pd.notna(grouped.iloc[-1]['W_Rate']) else 0,
                 'prediction': round(avg_sales, 1),
-                'confidence': 0.8,
                 'statistics': {
                     'low_sales': round(min(sales_values), 1),
                     'high_sales': round(max(sales_values), 1),
@@ -649,12 +656,22 @@ class DemandForecaster:
         """
         results = []
         for item_name in item_names:
-            item_df = self.df[self.df['Item_Name'] == item_name].sort_values('Date')
+            item_df = self.df[self.df['Item_Name'] == item_name]
 
             if item_df.empty:
                 continue
 
-            recent = item_df.tail(n_months)
+            # Group by Year and Month to aggregate duplicate rows
+            grouped = item_df.groupby(['Year', 'Month']).agg({
+                'Net_Qty': 'sum',
+                'Date': 'max',
+                'R_Rate': 'first',
+                'W_Rate': 'first',
+                'Category': 'first',
+                'Item_ID': 'first'
+            }).reset_index().sort_values('Date')
+
+            recent = grouped.tail(n_months)
             monthly_data = []
             sales_values = []
             for _, row in recent.iterrows():
@@ -673,7 +690,6 @@ class DemandForecaster:
 
             avg_sales = np.mean(sales_values)
             std_sales = np.std(sales_values) if len(sales_values) > 1 else 0
-            confidence = max(0.5, 1.0 - (std_sales / avg_sales)) if avg_sales > 0 else 0.5
 
             if len(sales_values) >= 2:
                 if sales_values[-1] > sales_values[-2] * 1.1:
@@ -692,7 +708,6 @@ class DemandForecaster:
                 'price': float(recent.iloc[-1]['R_Rate']) if pd.notna(recent.iloc[-1]['R_Rate']) else 0,
                 'purchase_price': float(recent.iloc[-1]['W_Rate']) if pd.notna(recent.iloc[-1]['W_Rate']) else 0,
                 'prediction': round(avg_sales, 1),
-                'confidence': 0.8,
                 'statistics': {
                     'low_sales': round(min(sales_values), 1),
                     'high_sales': round(max(sales_values), 1),

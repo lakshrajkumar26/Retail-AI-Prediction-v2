@@ -25,7 +25,6 @@ const ProductsTable = ({ products, expandedId, onToggleExpand, predictionDate })
             <th>Predicted Demand</th>
             <th>Trend</th>
             <th>Order Quantity</th>
-            <th>Confidence</th>
             <th>Actions</th>
           </tr>
         </thead>

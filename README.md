@@ -62,7 +62,7 @@ Access at: **http://localhost**
 pip install -r requirements.txt
 
 # Start backend
-python -m uvicorn inventory_model_secondary.src.api_production:app --reload --port 8001
+python -m uvicorn inventory_model_secondary.src.api_production:app --host 0.0.0.0 --port 8002
 ```
 
 #### Frontend
@@ -80,7 +80,7 @@ Access at: **http://localhost:5173**
 
 - **Frontend**: React 18 + Vite + Recharts
 - **Backend**: FastAPI + Python 3.11
-- **ML Models**: Prophet + XGBoost (Hybrid)
+- **ML Models**: XGBoost 
 - **Database**: SQLite
 - **Proxy**: Nginx
 - **Deployment**: Docker + Docker Compose

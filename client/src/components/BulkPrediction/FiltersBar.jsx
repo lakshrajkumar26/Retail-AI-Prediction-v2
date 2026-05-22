@@ -143,7 +143,7 @@ const FiltersBar = ({
             <option value="name">Name</option>
             <option value="demand">Demand</option>
             <option value="stock">Stock</option>
-            <option value="confidence">Confidence</option>
+            <option value="growth">Growth Trend</option>
           </select>
         </div>
 

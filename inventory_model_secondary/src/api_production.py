@@ -17,10 +17,36 @@ import os
 import math
 import io
 import csv
+import threading
 from datetime import datetime
 
 from .forecaster import DemandForecaster
 from .data_manager import DataManager
+
+# ============================================================
+# Month normalisation helper
+# ============================================================
+_MONTH_NAME_TO_NUM = {
+    'january':1,'february':2,'march':3,'april':4,'may':5,'june':6,
+    'july':7,'august':8,'september':9,'october':10,'november':11,'december':12,
+    'jan':1,'feb':2,'mar':3,'apr':4,'jun':6,'jul':7,'aug':8,
+    'sep':9,'oct':10,'nov':11,'dec':12,
+}
+
+def _normalize_month_num(val) -> int:
+    """Convert any month value (name string OR numeric string/int) to int 1-12. Returns 0 on failure."""
+    if val is None:
+        return 0
+    s = str(val).strip()
+    # Try direct integer parse first
+    try:
+        n = int(s)
+        if 1 <= n <= 12:
+            return n
+    except (ValueError, TypeError):
+        pass
+    # Try month name lookup
+    return _MONTH_NAME_TO_NUM.get(s.lower(), 0)
 
 # ============================================================
 # App Setup
@@ -138,6 +164,26 @@ def health():
     }
 
 
+@app.post("/reload-forecaster")
+def reload_forecaster():
+    """
+    Hot-reload the forecaster's training data from the database and clear the prediction cache.
+    Call this after uploading new monthly data or retraining the model to ensure
+    current_stock values reflect the latest dataset without a full server restart.
+    """
+    _require_ready()
+    try:
+        forecaster.reload_data()          # reloads master_training_data SQLite table + clears cache
+        data_manager.__init__(forecaster.df)  # refresh data_manager with new df
+        return {
+            "status": "success",
+            "message": f"Forecaster reloaded. {forecaster.df['Item_Name'].nunique()} items in memory.",
+            "timestamp": datetime.now().isoformat(),
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
+
+
 @app.get("/stats")
 def stats():
     _require_ready()
@@ -185,7 +231,7 @@ def model_info():
             'Group_II', 'Group_III', 'Group_IV', 'Group_V', 'Group_VI',
             'Category_Liquor'
         ],
-        "trained_on": f"master_training_data.csv ({data_period})",
+        "trained_on": f"SQLite master_training_data table ({data_period})",
         "items": forecaster.df['Item_Name'].nunique() if forecaster else 0,
         "status": "loaded",
     }
@@ -215,9 +261,6 @@ def predict(request: PredictRequest):
         "model": "xgboost_recursive",
         "summary": {
             "total_items": len(predictions),
-            "avg_confidence": round(
-                sum(p['confidence'] for p in predictions) / len(predictions), 3
-            ) if predictions else 0,
         },
         "predictions": predictions,
     }
@@ -279,9 +322,6 @@ def predict_paginated(
         "model": "xgboost_recursive",
         "summary": {
             "total_items": total_items,
-            "avg_confidence": round(
-                sum(p['confidence'] for p in all_predictions) / total_items, 3
-            ) if total_items > 0 else 0,
         },
         "predictions": page_predictions,
         "pagination": {
@@ -596,33 +636,39 @@ async def upload_data(
             "message": "This file has been stored in the database already, are you sure about this?"
         }
 
-    # 2. Save raw file
-    if year and category:
-        upload_dir = base_dir / "data" / str(year) / f"{category} {year}"
-    else:
-        upload_dir = base_dir / "converted_dataset"
-
-    upload_dir.mkdir(parents=True, exist_ok=True)
-    file_path = upload_dir / file.filename
-    with open(file_path, "wb") as f:
+    # 2. Save temporary file for in-memory cleaning
+    temp_dir = base_dir / "scratch"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_file_path = temp_dir / file.filename
+    with open(temp_file_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
 
-    # 3. Insert raw data to SQLite
+    # 3. Clean and Insert to SQLite
     try:
-        if file.filename.lower().endswith('.csv'):
-            df = pd.read_csv(file_path)
-        else:
-            df = pd.read_excel(file_path, engine='openpyxl')
+        import sys
+        sys.path.append(str(base_dir / "scripts"))
+        from clean_and_group import process_file, get_group_rename
+        
+        group_rename = get_group_rename(category)
+        is_liquor = category.lower() == 'liquor'
+        
+        # Clean the file in memory
+        df, parsed_month, month_full = process_file(str(temp_file_path), group_rename, is_liquor)
+        
+        # Delete the temporary file immediately
+        if temp_file_path.exists():
+            temp_file_path.unlink()
             
         df['_source_file'] = file.filename
-        df['_year'] = year
+        df['_year'] = int(year) if year else int(datetime.now().year)
         df['_month'] = month
         df['_category'] = category
-        df['_ingested_at'] = datetime.now()
+        df['_ingested_at'] = datetime.now().isoformat()
         
         # We drop the existing month data to avoid duplication if it's a force overwrite
         if existing and force == "true" and year and month and category:
             cursor.execute("DELETE FROM inventory_sales WHERE _year=? AND _month=? AND _category=?", (year, month, category))
+            cursor.execute("DELETE FROM upload_log WHERE year=? AND month=? AND category=?", (year, month, category))
         
         # Dynamically add any missing columns to prevent schema mismatch errors
         cursor.execute("PRAGMA table_info(inventory_sales)")
@@ -650,18 +696,22 @@ async def upload_data(
         """, (file.filename, year, month, category))
         conn.commit()
     except Exception as e:
+        if temp_file_path.exists():
+            temp_file_path.unlink()
         conn.close()
-        return {"status": "error", "message": f"Database insertion failed: {str(e)}"}
+        return {"status": "error", "message": f"Database insertion/cleaning failed: {str(e)}"}
         
     conn.close()
 
+    # NOTE: No automatic retraining — user uploads multiple files first, then triggers training manually
     return {
         "status": "success",
-        "message": f"File '{file.filename}' saved to raw archive successfully.",
-        "file_path": str(file_path),
+        "message": f"File '{file.filename}' cleaned and saved to database successfully. Upload more files or click 'Retrain Model' when ready.",
+        "file_path": None,
         "year": year,
         "month": month,
-        "category": category
+        "category": category,
+        "retraining": "not_started",
     }
 
 
@@ -670,86 +720,282 @@ async def upload_data(
 global_training_status = {
     "status": "idle",
     "progress": 0,
-    "message": "Ready"
+    "message": "Ready",
+    "last_trained_at": None,
+    "current_upload": None,
 }
+_retrain_lock = threading.Lock()
+
+
+def _run_retraining_task(triggered_by: str = "manual"):
+    """
+    Full retraining pipeline: Runs natively in memory and reads/writes from SQLite tables.
+    Runs in a background thread. Thread-safe via _retrain_lock.
+    """
+    global global_training_status, forecaster, data_manager
+    import sqlite3
+    import pandas as pd
+    import numpy as np
+    import xgboost as xgb
+    from datetime import datetime
+    from pathlib import Path
+
+    if not _retrain_lock.acquire(blocking=False):
+        print(f"[RETRAIN] Already running, skipping trigger by {triggered_by}")
+        global_training_status["queued"] = triggered_by
+        return
+
+    try:
+        base_dir = Path(__file__).resolve().parent.parent.parent
+        db_path = base_dir / "converted_dataset" / "inventory_sales.db"
+        model_path = base_dir / "model" / "xgboost_demand_model.json"
+
+        global_training_status.update({
+            "status": "training", "progress": 5,
+            "message": f"Starting native in-memory retraining pipeline (triggered by: {triggered_by})...",
+            "queued": None,
+        })
+
+        # Step 1: Load records from database
+        global_training_status.update({"progress": 15, "message": "Step 1/4: Loading clean data from SQLite inventory_sales..."})
+        conn = sqlite3.connect(str(db_path))
+        df_raw = pd.read_sql_query("SELECT * FROM inventory_sales", conn)
+        
+        if len(df_raw) == 0:
+            raise ValueError("No sales records found in inventory_sales table to train on.")
+
+        # Step 2: Feature Engineering (equivalent to prepare_dataset.py)
+        global_training_status.update({"progress": 30, "message": "Step 2/4: Running native feature engineering & epsilon imputation..."})
+        
+        # Normalize months
+        MONTH_MAP = {
+            'jan': 1, 'feb': 2, 'mar': 3, 'apr': 4, 'may': 5, 'jun': 6,
+            'jul': 7, 'aug': 8, 'sep': 9, 'oct': 10, 'nov': 11, 'dec': 12,
+            'january': 1, 'february': 2, 'march': 3, 'april': 4, 'june': 6,
+            'july': 7, 'august': 8, 'september': 9, 'october': 10, 'november': 11, 'december': 12
+        }
+        
+        def clean_month(val):
+            s = str(val).strip().lower()
+            if s.isdigit():
+                return int(s)
+            return MONTH_MAP.get(s, 1)
+
+        df_raw['Month'] = df_raw['_month'].apply(clean_month)
+        df_raw['Year'] = df_raw['_year'].astype(int)
+
+        # Parse Date
+        df_raw['Date'] = pd.to_datetime(df_raw['Year'].astype(str) + '-' + df_raw['Month'].astype(str).str.zfill(2) + '-01')
+        df_raw = df_raw.sort_values('Date')
+        df_raw['Quarter'] = df_raw['Date'].dt.quarter
+
+        # Time Index
+        unique_dates = sorted(df_raw['Date'].unique())
+        date_to_idx = {d: i+1 for i, d in enumerate(unique_dates)}
+        df_raw['Time_Index'] = df_raw['Date'].map(date_to_idx)
+
+        # Margins
+        df_raw['W_Rate'] = pd.to_numeric(df_raw['W_Rate'], errors='coerce').fillna(0)
+        df_raw['R_Rate'] = pd.to_numeric(df_raw['R_Rate'], errors='coerce').fillna(0)
+        df_raw['Margin_Abs'] = df_raw['R_Rate'] - df_raw['W_Rate']
+        df_raw['Margin_Pct'] = np.where(df_raw['W_Rate'] > 0, df_raw['Margin_Abs'] / df_raw['W_Rate'], 0)
+
+        # Unique Identifier
+        df_raw['Item_ID'] = df_raw['GP_Index_No'].astype(str) + "_" + df_raw['pluno'].astype(str)
+        df_raw['Category'] = df_raw['_category']
+
+        # Extract and Map Group column before aggregation
+        def extract_group_prefix(gp):
+            if pd.isna(gp): return None
+            import re
+            m = re.match(r'^([IVX]+)/', str(gp))
+            return m.group(1) if m else None
+
+        df_raw['Extracted_Group'] = df_raw['GP_Index_No'].apply(extract_group_prefix)
+        
+        def map_group(row):
+            orig = row['Extracted_Group']
+            cat = str(row['_category']).lower()
+            if not orig:
+                return 'VI' if 'liquor' in cat else 'II'
+            if 'liquor' in cat:
+                return 'VI' if orig in ['V', 'VI'] else orig
+            else:
+                mapping = {'I': 'I', 'II': 'II', 'III': 'III', 'IV': 'IV', 'VI': 'V'}
+                return mapping.get(orig, orig)
+                
+        df_raw['Group'] = df_raw.apply(map_group, axis=1)
+
+        # Aggregation of duplicates
+        agg_funcs = {
+            'Net_Qty': 'sum',
+            'Qty': 'sum',
+            'Refund_Qty': 'sum',
+            'R_Amt': 'sum',
+            'W_Amt': 'sum',
+            'Profit': 'sum',
+            'O_B': 'first',
+            'Closing_Stock': 'last',
+            'Net_Tax': 'sum',
+            'W_Rate': 'mean',
+            'R_Rate': 'mean',
+            'Margin_Abs': 'mean',
+            'Margin_Pct': 'mean',
+            'GP_Index_No': 'first',
+            'pluno': 'first',
+            'Item_Name': 'first',
+            'Group': 'first',
+            'Category': 'first',
+            'Month': 'first',
+            'Year': 'first',
+            'Quarter': 'first',
+            'Time_Index': 'first'
+        }
+        agg_cols = {k: v for k, v in agg_funcs.items() if k in df_raw.columns}
+        df_agg = df_raw.groupby(['Item_ID', 'Date'], as_index=False).agg(agg_cols)
+
+        # Grid reindexing (Imputation of missing/zero demand months)
+        all_items = df_agg['Item_ID'].unique()
+        all_dates = df_agg['Date'].unique()
+        idx = pd.MultiIndex.from_product([all_items, all_dates], names=['Item_ID', 'Date'])
+        
+        df_indexed = df_agg.set_index(['Item_ID', 'Date'])
+        df_full = df_indexed.reindex(idx).reset_index()
+
+        epsilon = 1.0
+        df_full['Net_Qty'] = df_full['Net_Qty'].fillna(epsilon)
+
+        # Fill metadata columns
+        metadata_cols = ['GP_Index_No', 'pluno', 'Item_Name', 'Group', 'Category', 
+                         'W_Rate', 'R_Rate', 'Margin_Abs', 'Margin_Pct']
+        df_full[metadata_cols] = df_full.groupby('Item_ID')[metadata_cols].ffill()
+        df_full[metadata_cols] = df_full.groupby('Item_ID')[metadata_cols].bfill()
+
+        # Recompute time features
+        df_full['Month'] = df_full['Date'].dt.month
+        df_full['Year'] = df_full['Date'].dt.year
+        df_full['Quarter'] = df_full['Date'].dt.quarter
+        df_full['Time_Index'] = df_full['Date'].map(date_to_idx)
+
+        # Lags and Rolling average features
+        df_full = df_full.sort_values(by=['Item_ID', 'Date'])
+        df_full['Lag_1'] = df_full.groupby('Item_ID')['Net_Qty'].shift(1)
+        df_full['Lag_2'] = df_full.groupby('Item_ID')['Net_Qty'].shift(2)
+        df_full['Lag_3'] = df_full.groupby('Item_ID')['Net_Qty'].shift(3)
+
+        df_full['Rolling_Mean_3M'] = df_full.groupby('Item_ID')['Net_Qty'].transform(
+            lambda x: x.shift(1).rolling(window=3, min_periods=1).mean()
+        )
+
+        df_full['Date'] = df_full['Date'].dt.strftime('%Y-%m-%d')
+
+        # Store in master_training_data SQLite table
+        global_training_status.update({"progress": 55, "message": "Step 2/4: Populating master_training_data table in SQLite..."})
+        df_full.to_sql('master_training_data', conn, if_exists='replace', index=False)
+        conn.close()
+
+        # Step 3: XGBoost Training
+        global_training_status.update({"progress": 70, "message": "Step 3/4: Fitting native XGBoost Demand Model..."})
+        
+        MODEL_FEATURES = [
+            'W_Rate', 'R_Rate', 'Margin_Abs', 'Margin_Pct',
+            'Month', 'Year', 'Quarter', 'Time_Index',
+            'Lag_1', 'Lag_2', 'Lag_3', 'Rolling_Mean_3M',
+            'Group_II', 'Group_III', 'Group_IV', 'Group_V', 'Group_VI',
+            'Category_Liquor'
+        ]
+
+        cols_to_drop = [
+            'Item_ID', 'Date', 'GP_Index_No', 'pluno', 'Item_Name', 
+            'Qty', 'Refund_Qty', 'R_Amt', 'W_Amt', 'Profit', 
+            'O_B', 'Closing_Stock', 'Net_Tax', 'Net_Qty'
+        ]
+
+        y = df_full['Net_Qty']
+        X = df_full.drop(columns=cols_to_drop, errors='ignore')
+
+        # OHE Group and Category
+        X = pd.get_dummies(X, columns=['Group', 'Category'], drop_first=True)
+        X = X.reindex(columns=MODEL_FEATURES, fill_value=0)
+
+        # Train model
+        model = xgb.XGBRegressor(
+            n_estimators=300,
+            learning_rate=0.05,
+            max_depth=5,
+            subsample=0.8,
+            colsample_bytree=0.8,
+            objective='reg:squarederror',
+            random_state=42,
+            n_jobs=-1
+        )
+        model.fit(X, y)
+
+        # Save model
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        model.save_model(str(model_path))
+        print("[RETRAIN] XGBoost Model trained and saved successfully.")
+
+        # Step 4: Reload model and data manager
+        global_training_status.update({"progress": 90, "message": "Step 4/4: Reloading trained model into memory..."})
+        try:
+            forecaster._load()
+            data_manager = DataManager(forecaster.df)
+            print("[RETRAIN] Model hot-reloaded successfully.")
+        except Exception as e:
+            global_training_status.update({"status": "error", "message": f"Model reload failed: {e}"})
+            return
+
+        global_training_status.update({
+            "status": "completed", "progress": 100,
+            "message": "Model retrained and reloaded natively successfully!",
+            "last_trained_at": datetime.now().isoformat(),
+        })
+
+    except Exception as e:
+        err = f"Pipeline execution failed: {str(e)}"
+        print(f"[RETRAIN] {err}")
+        global_training_status.update({"status": "error", "message": err})
+        import traceback
+        traceback.print_exc()
+    finally:
+        _retrain_lock.release()
+        # If another upload queued while we were training, start again
+        queued = global_training_status.get("queued")
+        if queued:
+            print(f"[RETRAIN] Starting queued retrain for: {queued}")
+            t = threading.Thread(target=_run_retraining_task, args=(queued,), daemon=True)
+            t.start()
+
+
+def _trigger_retrain_if_idle(triggered_by: str = "upload"):
+    """Launch background retrain if one isn't already running."""
+    if global_training_status.get("status") == "training":
+        global_training_status["queued"] = triggered_by
+        print(f"[RETRAIN] Queued retrain for: {triggered_by}")
+        return
+    t = threading.Thread(target=_run_retraining_task, args=(triggered_by,), daemon=True)
+    t.start()
+    print(f"[RETRAIN] Background retrain started for: {triggered_by}")
 
 @app.get("/training-status")
 def get_training_status():
-    return global_training_status
+    return {
+        **global_training_status,
+        "is_training": global_training_status.get("status") == "training",
+        "is_idle": global_training_status.get("status") in ("idle", "completed"),
+    }
 
 @app.post("/retrain")
-def retrain():
-    global global_training_status
-    global_training_status.update({"status": "training", "progress": 5, "message": "Starting retraining pipeline..."})
+def retrain(background_tasks: BackgroundTasks):
     """
-    Executes the full retraining pipeline: data cleaning -> feature engineering -> model training -> reload.
+    Triggers the full retraining pipeline in the background.
+    Returns immediately; poll /training-status for progress.
     """
-    import subprocess
-    from pathlib import Path
-    import sys
-
-    base_dir = Path(__file__).resolve().parent.parent.parent
-    scripts_dir = base_dir / "scripts"
-    
-    scripts = []
-    
-    # Generate clean_and_group scripts for 2024, 2025, 2026 and Grocery, Liquor
-    for yr in [2024, 2025, 2026]:
-        for cat in ["Grocery", "Liquor"]:
-            # Check if directory exists before trying to run the script for it
-            data_dir = base_dir / "data" / str(yr) / f"{cat} {yr}"
-            if data_dir.exists():
-                scripts.append((f"Cleaning {cat} {yr}", ["clean_and_group.py", "--year", str(yr), "--category", cat]))
-                
-    scripts.extend([
-        ("Preparing Dataset", ["prepare_dataset.py"]),
-        ("Training XGBoost Model", ["kaggle_xgboost_pipeline.py"])
-    ])
-    
-    output_log = []
-    
-    total_scripts = len(scripts)
-    for i, (step_name, script_args) in enumerate(scripts):
-        progress_pct = 10 + int(70 * (i / max(1, total_scripts)))
-        global_training_status.update({"progress": progress_pct, "message": f"Running {step_name}..."})
-        script_name = script_args[0]
-        script_path = scripts_dir / script_name
-        if not script_path.exists():
-            return {"status": "error", "error": f"Script not found: {script_name}"}
-        
-        print(f"\n[RETRAIN] Starting: {step_name} ({script_name})")
-        try:
-            cmd = [sys.executable, str(script_path)] + script_args[1:]
-            result = subprocess.run(
-                cmd,
-                cwd=str(base_dir),
-                capture_output=True,
-                text=True,
-                check=True
-            )
-            output_log.append(f"--- {step_name} SUCCESS ---\n{result.stdout}")
-        except subprocess.CalledProcessError as e:
-            error_msg = f"--- {step_name} FAILED ---\nExit Code: {e.returncode}\nStdout: {e.stdout}\nStderr: {e.stderr}"
-            print(error_msg)
-            global_training_status.update({"status": "error", "message": f"{step_name} failed."})
-            return {"status": "error", "error": f"Failed during {step_name}", "details": error_msg}
-    
-    global_training_status.update({"progress": 90, "message": "Reloading model..."})
-    # Reload the model in the forecaster
-    try:
-        forecaster._load()
-        output_log.append("--- Model Reloaded Successfully ---")
-    except Exception as e:
-        global_training_status.update({"status": "error", "message": "Failed to reload model."})
-        return {"status": "error", "error": f"Model trained but failed to reload: {str(e)}"}
-
-    global_training_status.update({"status": "completed", "progress": 100, "message": "Training complete!"})
-    return {
-        "status": "success",
-        "message": "Model retrained and loaded successfully.",
-        "note": "The new model is now serving predictions.",
-        "log": "\n".join(output_log)
-    }
+    if global_training_status.get("status") == "training":
+        return {"status": "already_running", "message": "Training is already in progress. Check /training-status."}
+    background_tasks.add_task(_trigger_retrain_if_idle, "manual")
+    return {"status": "started", "message": "Retraining started in background. Poll /training-status for progress."}
 
 
 # ============================================================
@@ -866,46 +1112,80 @@ import pandas as pd
 @app.get("/analytics/dashboard/historical")
 def dashboard_historical():
     """
-    Historical performance data for the Historical Performance tab.
-    Returns monthly actuals vs simulated predictions, year-over-year comparison,
-    and category breakdowns across 2024 and 2025.
+    Historical performance data sourced from SQLite DB (inventory_sales table).
+    Returns monthly sales volumes by year and category breakdowns.
     """
+    import sqlite3
+    import pandas as pd
+    from pathlib import Path
+
     _require_ready()
-    df = forecaster.df.copy()
-    years = sorted(df["Year"].dropna().unique())
-    max_year = int(years[-1]) if len(years) > 0 else 2026
-    prev_year = max_year - 1
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    db_path = base_dir / "converted_dataset" / "inventory_sales.db"
 
     month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                    7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    MONTH_NUM = {
+        'January':1,'February':2,'March':3,'April':4,'May':5,'June':6,
+        'July':7,'August':8,'September':9,'October':10,'November':11,'December':12
+    }
 
-    monthly_by_year = (
-        df.groupby(["Year", "Month"])["Net_Qty"]
-        .sum().reset_index().sort_values(["Year", "Month"])
-    )
-
-    monthly_comparison = []
-    for m in range(1, 13):
-        row = {"month": month_names[m], "month_num": m}
-        for year in [prev_year, max_year]:
-            val = monthly_by_year[(monthly_by_year["Year"]==year) & (monthly_by_year["Month"]==m)]["Net_Qty"]
-            row[f"sales_{year}"] = round(float(val.values[0]), 1) if len(val) > 0 else 0
-            row[f"predicted_{year}"] = round(row[f"sales_{year}"] * 0.95, 1)
-        monthly_comparison.append(row)
-
-    cat_year = df.groupby(["Year", "Category"])["Net_Qty"].sum().reset_index()
-    category_performance = {}
-    for _, r in cat_year.iterrows():
-        cat = r["Category"]
-        if cat not in category_performance:
-            category_performance[cat] = {}
-        category_performance[cat][int(r["Year"])] = round(float(r["Net_Qty"]), 1)
-
-    year_totals = df.groupby("Year")["Net_Qty"].sum()
-    year_totals_dict = {int(y): round(float(v), 1) for y, v in year_totals.items()}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        raw = pd.read_sql_query(
+            'SELECT "Net_Qty", "_year", "_month", "_category" FROM inventory_sales',
+            conn
+        )
+        conn.close()
+        raw['_year'] = pd.to_numeric(raw['_year'], errors='coerce')
+        raw = raw.dropna(subset=['_year'])
+        raw['_year'] = raw['_year'].astype(int)
+        raw['Net_Qty'] = pd.to_numeric(raw['Net_Qty'], errors='coerce').fillna(0)
+        raw['_month_num'] = raw['_month'].apply(_normalize_month_num)
+        years = sorted(raw['_year'].unique())
+        max_year = int(years[-1]) if years else 2025
+        prev_year = max_year - 1
+        monthly_comparison = []
+        for m in range(1, 13):
+            row = {"month": month_names[m], "month_num": m}
+            for year in years:
+                val = raw[(raw['_year'] == year) & (raw['_month_num'] == m)]['Net_Qty'].sum()
+                row[f"sales_{year}"] = round(float(val), 1)
+            monthly_comparison.append(row)
+        cat_year = raw.groupby(['_year', '_category'])['Net_Qty'].sum().reset_index()
+        category_performance = {}
+        for _, r in cat_year.iterrows():
+            cat = str(r['_category'])
+            if cat not in category_performance:
+                category_performance[cat] = {}
+            category_performance[cat][int(r['_year'])] = round(float(r['Net_Qty']), 1)
+        year_totals_dict = {int(y): round(float(raw[raw['_year']==y]['Net_Qty'].sum()), 1) for y in years}
+    except Exception as e:
+        print(f"[DASHBOARD/historical] SQLite error: {e} — falling back to CSV")
+        df = forecaster.df.copy()
+        years = sorted(df['Year'].dropna().unique())
+        max_year = int(years[-1]) if len(years) > 0 else 2025
+        prev_year = max_year - 1
+        monthly_by_year = df.groupby(["Year", "Month"])["Net_Qty"].sum().reset_index()
+        monthly_comparison = []
+        for m in range(1, 13):
+            row = {"month": month_names[m], "month_num": m}
+            for year in [int(y) for y in years]:
+                val = monthly_by_year[(monthly_by_year["Year"]==year) & (monthly_by_year["Month"]==m)]["Net_Qty"]
+                row[f"sales_{year}"] = round(float(val.values[0]), 1) if len(val) > 0 else 0
+            monthly_comparison.append(row)
+        cat_year = df.groupby(["Year", "Category"])["Net_Qty"].sum().reset_index()
+        category_performance = {}
+        for _, r in cat_year.iterrows():
+            cat = r["Category"]
+            if cat not in category_performance:
+                category_performance[cat] = {}
+            category_performance[cat][int(r["Year"])] = round(float(r["Net_Qty"]), 1)
+        year_totals = df.groupby("Year")["Net_Qty"].sum()
+        year_totals_dict = {int(y): round(float(v), 1) for y, v in year_totals.items()}
 
     growth_rate = 0.0
-    if prev_year in year_totals_dict and max_year in year_totals_dict and year_totals_dict[prev_year] > 0:
+    if prev_year in year_totals_dict and max_year in year_totals_dict and year_totals_dict.get(prev_year, 0) > 0:
         growth_rate = round((year_totals_dict[max_year] - year_totals_dict[prev_year]) / year_totals_dict[prev_year] * 100, 2)
 
     return {
@@ -915,7 +1195,8 @@ def dashboard_historical():
         "growth_rate": growth_rate,
         "accuracy": 92.4,
         "max_year": max_year,
-        "prev_year": prev_year
+        "prev_year": prev_year,
+        "available_years": sorted([int(y) for y in year_totals_dict.keys()]),
     }
 
 
@@ -959,7 +1240,7 @@ def dashboard_forecast():
         try:
             # Use actual XGBoost recursive forecaster
             preds = forecaster.predict_single_month(m, y)
-            total_forecast = sum(p.get('prediction', 0) for p in preds)
+            total_forecast = sum(p.get('final_prediction', 0) for p in preds)
         except Exception as e:
             print(f"[DASHBOARD] Forecast error for {m}/{y}: {e}")
             # Fallback to seasonal estimate
@@ -999,111 +1280,234 @@ def dashboard_forecast():
 
 @app.get("/analytics/dashboard/yearwise")
 def dashboard_yearwise():
-    """Year-wise sales analysis broken down by month and category."""
+    """Year-wise sales analysis sourced from SQLite DB, broken down by month and category."""
+    import sqlite3
+    import pandas as pd
+    from pathlib import Path
+
     _require_ready()
-    df = forecaster.df.copy()
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    db_path = base_dir / "converted_dataset" / "inventory_sales.db"
 
     month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                    7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
+    MONTH_NUM = {
+        'January':1,'February':2,'March':3,'April':4,'May':5,'June':6,
+        'July':7,'August':8,'September':9,'October':10,'November':11,'December':12
+    }
 
-    year_summary = []
-    for year in sorted(df["Year"].unique()):
-        year_df = df[df["Year"] == year]
-        total_units = float(year_df["Net_Qty"].sum())
-        total_revenue = float((year_df["Net_Qty"] * year_df["R_Rate"]).sum())
-        unique_items = int(year_df["Item_Name"].nunique())
-        monthly_sums = year_df.groupby("Month")["Net_Qty"].sum()
-        avg_monthly = float(monthly_sums.mean())
-        peak_month_idx = int(monthly_sums.idxmax()) if not monthly_sums.empty else 1
-        year_summary.append({
-            "year": int(year),
-            "total_units": round(total_units, 1),
-            "total_revenue": round(total_revenue, 2),
-            "unique_items": unique_items,
-            "avg_monthly_units": round(avg_monthly, 1),
-            "peak_month": month_names[peak_month_idx],
-        })
-
-    monthly_series = []
-    for m in range(1, 13):
-        row = {"month": month_names[m]}
+    try:
+        conn = sqlite3.connect(str(db_path))
+        raw = pd.read_sql_query(
+            'SELECT "Net_Qty", "R_Rate", "_year", "_month", "_category", "Item_Name" FROM inventory_sales',
+            conn
+        )
+        conn.close()
+        raw['_year'] = pd.to_numeric(raw['_year'], errors='coerce')
+        raw = raw.dropna(subset=['_year'])
+        raw['_year'] = raw['_year'].astype(int)
+        raw['Net_Qty'] = pd.to_numeric(raw['Net_Qty'], errors='coerce').fillna(0)
+        raw['R_Rate'] = pd.to_numeric(raw['R_Rate'], errors='coerce').fillna(0)
+        raw['_month_num'] = raw['_month'].apply(_normalize_month_num)
+        year_summary = []
+        for year in sorted(raw['_year'].unique()):
+            ydf = raw[raw['_year'] == year]
+            total_units = float(ydf['Net_Qty'].sum())
+            total_revenue = float((ydf['Net_Qty'] * ydf['R_Rate']).sum())
+            unique_items = int(ydf['Item_Name'].nunique()) if 'Item_Name' in ydf.columns else 0
+            monthly_sums = ydf.groupby('_month_num')['Net_Qty'].sum()
+            monthly_sums = monthly_sums[monthly_sums.index > 0]
+            avg_monthly = float(monthly_sums.mean()) if not monthly_sums.empty else 0
+            peak_month_idx = int(monthly_sums.idxmax()) if not monthly_sums.empty else 1
+            year_summary.append({
+                "year": int(year),
+                "total_units": round(total_units, 1),
+                "total_revenue": round(total_revenue, 2),
+                "unique_items": unique_items,
+                "avg_monthly_units": round(avg_monthly, 1),
+                "peak_month": month_names.get(peak_month_idx, 'Jan'),
+            })
+        monthly_series = []
+        for m in range(1, 13):
+            row = {"month": month_names[m]}
+            for year in sorted(raw['_year'].unique()):
+                val = raw[(raw['_year'] == year) & (raw['_month_num'] == m)]['Net_Qty'].sum()
+                row[f"y{int(year)}"] = round(float(val), 1)
+            monthly_series.append(row)
+        cat_year = raw.groupby(['_year', '_category'])['Net_Qty'].sum().reset_index()
+        category_by_year = {}
+        for _, r in cat_year.iterrows():
+            cat = str(r['_category'])
+            if cat not in category_by_year:
+                category_by_year[cat] = {}
+            category_by_year[cat][int(r['_year'])] = round(float(r['Net_Qty']), 1)
+        years = sorted([int(y) for y in raw['_year'].unique()])
+    except Exception as e:
+        print(f"[DASHBOARD/yearwise] SQLite error: {e} — falling back to CSV")
+        df = forecaster.df.copy()
+        year_summary = []
         for year in sorted(df["Year"].unique()):
-            year_df = df[(df["Year"] == year) & (df["Month"] == m)]
-            row[f"y{int(year)}"] = round(float(year_df["Net_Qty"].sum()), 1)
-        monthly_series.append(row)
-
-    cat_year = df.groupby(["Year", "Category"])["Net_Qty"].sum().reset_index()
-    category_by_year = {}
-    for _, r in cat_year.iterrows():
-        cat = r["Category"]
-        if cat not in category_by_year:
-            category_by_year[cat] = {}
-        category_by_year[cat][int(r["Year"])] = round(float(r["Net_Qty"]), 1)
+            year_df = df[df["Year"] == year]
+            total_units = float(year_df["Net_Qty"].sum())
+            total_revenue = float((year_df["Net_Qty"] * year_df["R_Rate"]).sum())
+            unique_items = int(year_df["Item_Name"].nunique())
+            monthly_sums = year_df.groupby("Month")["Net_Qty"].sum()
+            avg_monthly = float(monthly_sums.mean()) if not monthly_sums.empty else 0
+            peak_month_idx = int(monthly_sums.idxmax()) if not monthly_sums.empty else 1
+            year_summary.append({
+                "year": int(year),
+                "total_units": round(total_units, 1),
+                "total_revenue": round(total_revenue, 2),
+                "unique_items": unique_items,
+                "avg_monthly_units": round(avg_monthly, 1),
+                "peak_month": month_names[peak_month_idx],
+            })
+        monthly_series = []
+        for m in range(1, 13):
+            row = {"month": month_names[m]}
+            for year in sorted(df["Year"].unique()):
+                row[f"y{int(year)}"] = round(float(df[(df["Year"]==year) & (df["Month"]==m)]["Net_Qty"].sum()), 1)
+            monthly_series.append(row)
+        cat_year = df.groupby(["Year", "Category"])["Net_Qty"].sum().reset_index()
+        category_by_year = {}
+        for _, r in cat_year.iterrows():
+            cat = r["Category"]
+            if cat not in category_by_year:
+                category_by_year[cat] = {}
+            category_by_year[cat][int(r["Year"])] = round(float(r["Net_Qty"]), 1)
+        years = sorted([int(y) for y in df["Year"].unique()])
 
     return {
         "year_summary": year_summary,
         "monthly_series": monthly_series,
         "category_by_year": category_by_year,
-        "years": sorted([int(y) for y in df["Year"].unique()]),
+        "years": years,
     }
 
 
 @app.get("/analytics/dashboard/product-analysis")
 def dashboard_product_analysis(item_name: str = Query(...)):
-    """Deep per-product analysis for the Interactive Analysis tab."""
-    _require_ready()
+    """
+    Deep per-product analysis merging CSV historical data + SQLite recent uploads.
+    New months uploaded appear immediately without needing a full retrain.
+    """
+    import sqlite3
     import numpy as np
-    df = forecaster.df.copy()
-
-    item_df = df[df["Item_Name"] == item_name].sort_values("Date")
-    if item_df.empty:
-        raise HTTPException(status_code=404, detail=f"Item '{item_name}' not found")
+    _require_ready()
+    from pathlib import Path
 
     month_names = {1:"Jan",2:"Feb",3:"Mar",4:"Apr",5:"May",6:"Jun",
                    7:"Jul",8:"Aug",9:"Sep",10:"Oct",11:"Nov",12:"Dec"}
 
-    year_totals = item_df.groupby("Year")["Net_Qty"].sum()
-    year_wise = [{"year": int(y), "units": round(float(v), 1)} for y, v in year_totals.items()]
+    # ---- 1. Load from CSV (training data) ----
+    df = forecaster.df.copy()
+    item_df = df[df["Item_Name"] == item_name].sort_values("Date")
 
-    monthly_avg = item_df.groupby("Month")["Net_Qty"].mean()
-    monthly_pattern = [{"month": month_names[int(m)], "avg_units": round(float(v), 1)} for m, v in monthly_avg.items()]
+    # ---- 2. Load from SQLite (recent uploads not yet in CSV) ----
+    base_dir = Path(__file__).resolve().parent.parent.parent
+    db_path = base_dir / "converted_dataset" / "inventory_sales.db"
+    db_rows = []
+    try:
+        conn = sqlite3.connect(str(db_path))
+        raw_db = pd.read_sql_query(
+            'SELECT "Net_Qty", "R_Rate", "W_Rate", "Closing_Stock", "_year", "_month", "_category", "Group" FROM inventory_sales WHERE "Item_Name" = ?',
+            conn, params=[item_name]
+        )
+        conn.close()
+        if not raw_db.empty:
+            raw_db['_year'] = pd.to_numeric(raw_db['_year'], errors='coerce')
+            raw_db = raw_db.dropna(subset=['_year'])
+            raw_db['_year'] = raw_db['_year'].astype(int)
+            raw_db['Net_Qty'] = pd.to_numeric(raw_db['Net_Qty'], errors='coerce').fillna(0)
+            raw_db['_month_num'] = raw_db['_month'].apply(_normalize_month_num)
+            raw_db = raw_db[raw_db['_month_num'] > 0]
+            db_rows = raw_db[['_year','_month_num','Net_Qty']].rename(
+                columns={'_year':'Year','_month_num':'Month'}
+            ).to_dict('records')
+    except Exception as e:
+        print(f"[product-analysis] SQLite read error for {item_name}: {e}")
 
-    time_series = []
+    if item_df.empty and not db_rows:
+        raise HTTPException(status_code=404, detail=f"Item '{item_name}' not found")
+
+    # ---- 3. Build merged time_series (CSV + SQLite, deduplicated by year/month) ----
+    # Use dict keyed by (year, month) -> total units
+    merged = {}
     for _, row in item_df.iterrows():
-        time_series.append({
-            "label": row["Date"].strftime("%b %Y"),
-            "year": int(row["Year"]),
-            "month": int(row["Month"]),
-            "units": round(float(row["Net_Qty"]) if pd.notna(row["Net_Qty"]) else 0, 1),
-        })
+        key = (int(row['Year']), int(row['Month']))
+        merged[key] = merged.get(key, 0) + float(row['Net_Qty']) if pd.notna(row['Net_Qty']) else 0
+    for r in db_rows:
+        key = (int(r['Year']), int(r['Month']))
+        if key not in merged:  # Only add months not already in CSV
+            merged[key] = float(r['Net_Qty'])
 
-    overall_mean = float(monthly_avg.mean()) if len(monthly_avg) > 0 else 1
+    # ---- 4. Compute stats from merged data ----
+    time_series = sorted(
+        [{"year": y, "month": m, "units": round(v, 1),
+          "label": f"{month_names.get(m, '?')} {y}"} for (y, m), v in merged.items()],
+        key=lambda x: (x['year'], x['month'])
+    )
+
+    # Year totals
+    year_totals_map = {}
+    for (y, m), v in merged.items():
+        year_totals_map[y] = year_totals_map.get(y, 0) + v
+    year_wise = [{"year": y, "units": round(v, 1)} for y, v in sorted(year_totals_map.items())]
+
+    # Monthly averages across all years
+    month_sum = {}
+    month_count = {}
+    for (y, m), v in merged.items():
+        month_sum[m] = month_sum.get(m, 0) + v
+        month_count[m] = month_count.get(m, 0) + 1
+    monthly_avg = {m: month_sum[m] / month_count[m] for m in month_sum}
+    monthly_pattern = [{"month": month_names[m], "avg_units": round(v, 1)}
+                        for m, v in sorted(monthly_avg.items())]
+
+    overall_mean = float(sum(monthly_avg.values()) / len(monthly_avg)) if monthly_avg else 1
     seasonality = []
     for m in range(1, 13):
         avg = float(monthly_avg.get(m, overall_mean))
         factor = round(avg / overall_mean, 3) if overall_mean > 0 else 1.0
         seasonality.append({"month": month_names[m], "factor": factor, "avg_units": round(avg, 1)})
 
-    sales_vals = item_df["Net_Qty"].dropna().values
-    mean_s = float(sales_vals.mean()) if len(sales_vals) > 0 else 0
-    std_s = float(sales_vals.std()) if len(sales_vals) > 1 else 0
+    sales_vals = [v for v in merged.values()]
+    mean_s = float(sum(sales_vals) / len(sales_vals)) if sales_vals else 0
+    std_s = float((sum((x - mean_s) ** 2 for x in sales_vals) / len(sales_vals)) ** 0.5) if len(sales_vals) > 1 else 0
     cv = std_s / mean_s if mean_s > 0 else 0
 
-    peak_m = int(monthly_avg.idxmax()) if len(monthly_avg) > 0 else 1
-    low_m = int(monthly_avg.idxmin()) if len(monthly_avg) > 0 else 1
+    peak_m = max(monthly_avg, key=monthly_avg.get) if monthly_avg else 1
+    low_m = min(monthly_avg, key=monthly_avg.get) if monthly_avg else 1
     top3 = sorted(monthly_avg.items(), key=lambda x: x[1], reverse=True)[:3]
-    peak_season = ", ".join([month_names[int(m)] for m, _ in top3])
+    peak_season = ", ".join([month_names[m] for m, _ in top3 if m in month_names])
 
-    t2024 = float(year_totals.get(2024, 0))
-    t2025 = float(year_totals.get(2025, 0))
-    growth_rate = (t2025 - t2024) / t2024 * 100 if t2024 > 0 else 0
+    # Get latest year values for growth trend
+    all_years = sorted(year_totals_map.keys())
+    y_last = all_years[-1] if all_years else 2025
+    y_prev = all_years[-2] if len(all_years) >= 2 else y_last
+    t_last = year_totals_map.get(y_last, 0)
+    t_prev = year_totals_map.get(y_prev, 0)
+    growth_rate = (t_last - t_prev) / t_prev * 100 if t_prev > 0 else 0
     trend_label = "Growing" if growth_rate > 5 else ("Declining" if growth_rate < -5 else "Stable")
     volatility_label = "High" if cv > 1.0 else ("Medium" if cv > 0.5 else "Low")
 
+    # Metadata from CSV or fallback
+    if not item_df.empty:
+        category = item_df.iloc[-1]["Category"]
+        group = item_df.iloc[-1]["Group"]
+    else:
+        category = db_rows[0].get('_category', 'Unknown') if db_rows else 'Unknown'
+        group = 'Unknown'
+
     return {
         "item_name": item_name,
-        "category": item_df.iloc[-1]["Category"],
-        "group": item_df.iloc[-1]["Group"],
+        "category": category,
+        "group": group,
+        "data_sources": {
+            "csv_months": len(item_df),
+            "sqlite_months": len(db_rows),
+            "merged_months": len(merged),
+        },
         "year_wise": year_wise,
         "monthly_pattern": monthly_pattern,
         "time_series": time_series,
@@ -1113,16 +1517,16 @@ def dashboard_product_analysis(item_name: str = Query(...)):
             "volatility": {"label": volatility_label, "cv": round(cv, 3), "std": round(std_s, 1)},
             "seasonal_pattern": {
                 "peak_months": peak_season,
-                "peak_month": month_names[peak_m],
-                "low_month": month_names[low_m],
+                "peak_month": month_names.get(peak_m, 'N/A'),
+                "low_month": month_names.get(low_m, 'N/A'),
             },
             "sales_range": {
-                "min": round(float(sales_vals.min()), 1) if len(sales_vals) > 0 else 0,
-                "max": round(float(sales_vals.max()), 1) if len(sales_vals) > 0 else 0,
+                "min": round(min(sales_vals), 1) if sales_vals else 0,
+                "max": round(max(sales_vals), 1) if sales_vals else 0,
                 "mean": round(mean_s, 1),
-                "median": round(float(np.median(sales_vals)), 1) if len(sales_vals) > 0 else 0,
+                "median": round(sorted(sales_vals)[len(sales_vals)//2], 1) if sales_vals else 0,
             },
-            "year_totals": {"2024": round(t2024, 1), "2025": round(t2025, 1)},
+            "year_totals": {str(y): round(v, 1) for y, v in year_totals_map.items()},
         },
     }
 
@@ -1140,14 +1544,17 @@ class BudgetRequest(BaseModel):
 def allocate_budget(req: BudgetRequest):
     import numpy as np
     _require_ready()
+    # Filter out null Item_Name rows to avoid corrupted aggregates skewing demand calculations
     df = forecaster.df.copy()
+    df = df[df['Item_Name'].notna() & (df['Item_Name'] != '') & (df['Item_Name'] != 'None')]
     budget = req.budget
     target_month = req.month
     if budget <= 0:
         raise HTTPException(400, 'Budget must be positive')
     month_names = {1:'Jan',2:'Feb',3:'Mar',4:'Apr',5:'May',6:'Jun',7:'Jul',8:'Aug',9:'Sep',10:'Oct',11:'Nov',12:'Dec'}
     group_labels = {'I':'Group I - FMCG Essentials','II':'Group II - Premium Grocery','III':'Group III - Specialty Items','IV':'Group IV - High-Value Goods','V':'Group V - Daily Staples','VI':'Group VI - Liquor and Beverages'}
-    groups = df['Group'].unique().tolist()
+    # Exclude None/null groups
+    groups = [g for g in df['Group'].unique().tolist() if g is not None and str(g) != 'None']
     
     def safe_float(val):
         if val is None: return 0.0
@@ -1163,7 +1570,9 @@ def allocate_budget(req: BudgetRequest):
     all_predictions = forecaster.predict_single_month(target_month, req.year)
     preds_by_group = {}
     for p in all_predictions:
-        g = p.get('group', 'II')
+        g = p.get('group')
+        # Skip predictions with null/None groups
+        if g is None or str(g) == 'None': continue
         if g not in preds_by_group:
             preds_by_group[g] = []
         preds_by_group[g].append(p)
@@ -1172,20 +1581,42 @@ def allocate_budget(req: BudgetRequest):
         gdf = df[df['Group'] == grp]
         items_in_grp = gdf['Item_Name'].nunique()
         category = gdf['Category'].mode().iloc[0] if len(gdf) > 0 else 'Grocery'
-        month_data = gdf[gdf['Month'] == target_month]
-        if len(month_data) > 0:
-            avg_monthly_demand = float(month_data.groupby('Item_Name')['Qty'].mean().sum())
+        
+        # Use AI model predictions for avg_monthly_demand (more accurate and consistent)
+        grp_preds_for_demand = preds_by_group.get(grp, [])
+        if grp_preds_for_demand:
+            avg_monthly_demand = sum(safe_float(p.get('final_prediction', 0)) for p in grp_preds_for_demand)
         else:
-            avg_monthly_demand = float(gdf.groupby(['Year','Month'])['Qty'].sum().mean())
-            
+            # Fallback to historical — but filter nulls to avoid corrupted rows
+            month_data = gdf[gdf['Month'] == target_month]
+            if len(month_data) > 0:
+                avg_monthly_demand = float(month_data.groupby('Item_Name')['Net_Qty'].mean().sum())
+            else:
+                avg_monthly_demand = float(gdf.groupby(['Year','Month'])['Net_Qty'].sum().mean())
+
         if np.isnan(avg_monthly_demand):
             avg_monthly_demand = 0.0
             
-        avg_price = float(gdf['R_Rate'].mean()) if len(gdf) > 0 else 0
-        if avg_price == 0 or np.isnan(avg_price):
-            avg_price = float(gdf['W_Rate'].mean()) if len(gdf) > 0 else 1
-        if np.isnan(avg_price) or avg_price == 0:
-            avg_price = 1
+        # Use per-item median price to avoid extreme outliers skewing the average
+        # (e.g., a single high R_Rate typo can ruin a whole group's weight)
+        if len(gdf) > 0:
+            # Get the last known price per item, then take the median across items
+            per_item_price = gdf.groupby('Item_Name')['R_Rate'].last()
+            per_item_price = per_item_price[per_item_price > 0].dropna()
+            if len(per_item_price) == 0:
+                per_item_price = gdf.groupby('Item_Name')['W_Rate'].last()
+                per_item_price = per_item_price[per_item_price > 0].dropna()
+            # Cap at 99th percentile to eliminate data-entry errors before taking median
+            if len(per_item_price) > 0:
+                cap = per_item_price.quantile(0.99)
+                per_item_price = per_item_price.clip(upper=cap)
+                avg_price = float(per_item_price.median())
+            else:
+                avg_price = 1.0
+        else:
+            avg_price = 1.0
+        if np.isnan(avg_price) or avg_price <= 0:
+            avg_price = 1.0
         estimated_cost = avg_monthly_demand * avg_price
         total_demand_cost += estimated_cost
         
@@ -1222,7 +1653,7 @@ def allocate_budget(req: BudgetRequest):
         prod_list.sort(key=lambda x: x['total_sold'], reverse=True)
         
         if not prod_list:
-            all_products = gdf.groupby('Item_Name').agg(total_qty=('Qty','sum'), avg_price=('R_Rate','mean')).sort_values('total_qty', ascending=False).reset_index()
+            all_products = gdf.groupby('Item_Name').agg(total_qty=('Net_Qty','sum'), avg_price=('R_Rate','mean')).sort_values('total_qty', ascending=False).reset_index()
             for _, row in all_products.iterrows():
                 tq = safe_float(row['total_qty'])
                 ap = safe_float(row['avg_price'])

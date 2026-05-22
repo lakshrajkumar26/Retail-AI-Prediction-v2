@@ -667,7 +667,6 @@ const BulkPrediction = () => {
                   <th>Unit Price (₹)</th>
                   <th>Total Cost (₹)</th>
                   <th>Order Qty</th>
-                  <th>Confidence</th>
                 </tr>
               </thead>
               <tbody>
@@ -696,11 +695,6 @@ const BulkPrediction = () => {
                       <td>₹{salesPrice.toFixed(2)}</td>
                       <td style={{ fontWeight: 'bold', color: '#10b981' }}>₹{Math.round(orderCost).toLocaleString('en-IN')}</td>
                       <td>{(pred.recommended_order || demand).toLocaleString('en-IN')}</td>
-                      <td>
-                        <span className={`confidence-badge ${pred.confidence > 0.7 ? 'high' : pred.confidence > 0.5 ? 'medium' : 'low'}`}>
-                          {((pred.confidence || 0) * 100).toFixed(1)}%
-                        </span>
-                      </td>
                     </tr>
                     {state.expandedResultId === pred.item_name && (
                       <tr className="expanded-row">
@@ -745,30 +739,13 @@ const BulkPrediction = () => {
                                 <div className="stat-label">Purchase Price</div>
                                 <div className="stat-value">₹{purchasePrice.toFixed(2)}</div>
                               </div>
-                              <div className="stat-card">
-                                <div className="stat-label">Confidence</div>
-                                <div className="stat-value">
-                                  <span className={`confidence-badge ${pred.confidence > 0.7 ? 'high' : 'medium'}`}>
-                                    {((pred.confidence || 0) * 100).toFixed(1)}%
-                                  </span>
-                                </div>
-                              </div>
                             </div>
 
-                            <div className="confidence-analysis">
-                              <h4>🎯 Forecast Analysis</h4>
-                              <div className="confidence-details">
-                                <div className="confidence-explanation">
-                                  <p>📦 <strong>Bulk Order:</strong> Stock {demand.toLocaleString('en-IN')} units of {pred.item_name} to cover demand for the next {pred.n_months || state.selectedMonths} months.</p>
-                                  <p>💰 <strong>Budget Required:</strong> ₹{Math.round(orderCost).toLocaleString('en-IN')} at ₹{purchasePrice.toFixed(2)}/unit.</p>
-                                  <p>📈 <strong>Expected Profit:</strong> ₹{Math.round(expectedProfit).toLocaleString('en-IN')} ({profitMargin.toFixed(1)}% margin).</p>
-                                  {pred.confidence < 0.7 && (
-                                    <p className="confidence-recommendation">
-                                      💡 <strong>Note:</strong> Confidence is below 70% — consider ordering 10-15% extra as buffer.
-                                    </p>
-                                  )}
-                                </div>
-                              </div>
+                            <div className="forecast-analysis">
+                              <h4>📊 Forecast Analysis</h4>
+                              <p>📦 <strong>Bulk Order:</strong> Stock {demand.toLocaleString('en-IN')} units of {pred.item_name} to cover demand for the next {pred.n_months || state.selectedMonths} months.</p>
+                              <p>💰 <strong>Budget Required:</strong> ₹{Math.round(orderCost).toLocaleString('en-IN')} at ₹{purchasePrice.toFixed(2)}/unit.</p>
+                              <p>📈 <strong>Expected Profit:</strong> ₹{Math.round(expectedProfit).toLocaleString('en-IN')} ({profitMargin.toFixed(1)}% margin).</p>
                             </div>
                           </div>
                         </td>

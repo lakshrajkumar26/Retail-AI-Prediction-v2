@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { getDataFormat, uploadMonthlyData, retrainModel, checkHealth, getDataPreview, getTrainingStatus } from "../api";
+import { getDataFormat, uploadMonthlyData, retrainModel, checkHealth, getDataPreview, getTrainingStatus, reloadForecaster } from "../api";
 import { modelEvents } from "../services/modelEvents";
 import LoadingSpinner from "../components/LoadingSpinner";
 import "./DataUpload.css";
@@ -16,6 +16,8 @@ const DataUpload = () => {
   const [trainingStatusData, setTrainingStatusData] = useState({status: "idle", progress: 0, message: ""});
   const [dbStats, setDbStats] = useState(null);
   const [loadingDbStats, setLoadingDbStats] = useState(false);
+  const [reloading, setReloading] = useState(false);
+  const [reloadResult, setReloadResult] = useState(null);
 
   // Form fields
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
@@ -187,27 +189,44 @@ const DataUpload = () => {
     }
   };
 
+  const handleReloadForecaster = async () => {
+    setReloading(true);
+    setReloadResult(null);
+    try {
+      const result = await reloadForecaster();
+      setReloadResult({ success: true, message: result.message });
+    } catch (error) {
+      setReloadResult({ success: false, message: error.response?.data?.detail || error.message || "Reload failed" });
+    } finally {
+      setReloading(false);
+    }
+  };
+
   return (
     <div className="data-upload-page">
       <div className="page-header">
         <h1>📤 Data Upload & Model Training</h1>
         <p className="subtitle">
-          Upload raw monthly sales data to the database, then retrain the XGBoost model to update demand forecasts
+          Upload one or more monthly sales files — data is stored safely in the database. When you're ready, click <strong>Retrain Model</strong> to update the AI forecasts.
         </p>
       </div>
 
-      {/* Training Progress Banner */}
-      {trainingStatusData.status === "training" && (
-        <div className="model-health-card" style={{marginBottom: '20px', borderLeft: '4px solid #4caf50'}}>
+      {/* Training Progress Banner — shows whenever training is running */}
+      {(trainingStatusData.status === "training" || trainingStatusData.status === "error") && (
+        <div className="model-health-card" style={{marginBottom: '20px', borderLeft: `4px solid ${trainingStatusData.status === 'error' ? '#f44336' : '#4caf50'}`}}>
           <div className="health-content" style={{width: '100%'}}>
-            <span className="health-icon">⚙️</span>
+            <span className="health-icon">{trainingStatusData.status === 'error' ? '❌' : '⚙️'}</span>
             <div className="health-info" style={{width: '100%'}}>
-              <h3>Model Training in Progress</h3>
+              <h3>{trainingStatusData.status === 'error' ? 'Training Failed' : 'Retraining in Progress'}</h3>
               <p>{trainingStatusData.message}</p>
-              <div style={{width: '100%', height: '12px', backgroundColor: '#333', borderRadius: '6px', overflow: 'hidden', marginTop: '10px'}}>
-                <div style={{width: `${trainingStatusData.progress}%`, height: '100%', backgroundColor: '#4caf50', transition: 'width 0.5s ease'}}></div>
-              </div>
-              <p style={{textAlign: 'right', fontSize: '12px', marginTop: '5px', color: '#aaa'}}>{trainingStatusData.progress}% Complete</p>
+              {trainingStatusData.status === 'training' && (
+                <>
+                  <div style={{width: '100%', height: '12px', backgroundColor: '#333', borderRadius: '6px', overflow: 'hidden', marginTop: '10px'}}>
+                    <div style={{width: `${trainingStatusData.progress}%`, height: '100%', backgroundColor: '#4caf50', transition: 'width 0.5s ease'}}></div>
+                  </div>
+                  <p style={{textAlign: 'right', fontSize: '12px', marginTop: '5px', color: '#aaa'}}>{trainingStatusData.progress}% Complete</p>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -219,8 +238,11 @@ const DataUpload = () => {
           <div className="health-content">
             <span className="health-icon">✅</span>
             <div className="health-info">
-              <h3>Training Complete</h3>
-              <p>Model has been retrained and is now serving updated predictions.</p>
+              <h3>Retraining Complete!</h3>
+              <p>Model has been retrained with your uploaded data and is now serving updated predictions.</p>
+              {trainingStatusData.last_trained_at && (
+                <p style={{fontSize: '12px', color: '#aaa', marginTop: '4px'}}>Completed at: {new Date(trainingStatusData.last_trained_at).toLocaleString()}</p>
+              )}
             </div>
           </div>
         </div>
@@ -410,8 +432,8 @@ const DataUpload = () => {
         <div className="upload-card">
           <h2>📁 Upload Monthly Sales Data</h2>
           <p className="card-description">
-            Upload raw sales data for a specific month. The file will be saved to the raw data archive and stored in the SQLite database.
-            <strong> Uploading does NOT retrain the model</strong> — use the "Retrain Model" button after uploading all your files.
+            Upload raw sales data for a specific month. The file is stored in the database — <strong>no training happens automatically</strong>.
+            Upload as many months as you need, then click <strong>Retrain Model</strong> on the right to update the forecasts.
           </p>
 
           <div className="upload-form">
@@ -462,7 +484,7 @@ const DataUpload = () => {
               <span className="info-icon">ℹ️</span>
               <span>
                 Uploading raw data for: <strong>{monthNames[selectedMonth - 1]} {selectedYear}</strong> — <strong>{selectedCategory}</strong>
-                <span style={{marginLeft: '10px', fontSize: '12px', color: '#aaa'}}>(Data will be archived — model will NOT auto-retrain)</span>
+                <span style={{marginLeft: '10px', fontSize: '12px', color: '#64b5f6'}}>💾 Will be saved to database only — retrain manually when ready</span>
               </span>
             </div>
 
@@ -511,14 +533,14 @@ const DataUpload = () => {
               >
                 {uploadResult.success ? (
                   <>
-                    <h3>✅ Data Saved Successfully</h3>
+                    <h3>✅ Data Saved to Database</h3>
                     <div className="result-details">
                       <p><strong>File:</strong> {uploadResult.filename}</p>
                       <p><strong>Period:</strong> {monthNames[uploadResult.month - 1]} {uploadResult.year}</p>
                       <p><strong>Category:</strong> {uploadResult.category}</p>
                       <p className="success-message">{uploadResult.message}</p>
-                      <p className="note-message" style={{marginTop: '8px', fontSize: '13px', color: '#ffab40'}}>
-                        💡 Data has been archived. Click "Retrain Model with Latest Data" when ready to update predictions.
+                      <p className="note-message" style={{marginTop: '8px', fontSize: '13px', color: '#64b5f6'}}>
+                        💾 File stored. Upload more months or click <strong>Retrain Model</strong> on the right when ready.
                       </p>
                     </div>
                   </>
@@ -601,6 +623,30 @@ const DataUpload = () => {
               )}
             </div>
           )}
+
+          {/* Refresh Stock Data — quick reload without full retrain */}
+          <div style={{ marginTop: '20px', padding: '16px', background: 'rgba(100, 181, 246, 0.05)', borderRadius: '10px', border: '1px solid rgba(100, 181, 246, 0.2)' }}>
+            <h4 style={{ color: '#64b5f6', marginBottom: '6px' }}>🔄 Refresh Stock Data</h4>
+            <p style={{ color: '#94a3b8', fontSize: '13px', marginBottom: '12px' }}>
+              If stock values in predictions look incorrect, click this to reload the latest training data and refresh current stock levels — <strong>no retraining needed</strong>. Takes a few seconds.
+            </p>
+            <button
+              onClick={handleReloadForecaster}
+              disabled={reloading}
+              className="btn-secondary"
+              style={{ marginBottom: reloadResult ? '10px' : '0' }}
+            >
+              {reloading ? '⏳ Refreshing...' : '🔃 Refresh Stock Data Now'}
+            </button>
+            {reloadResult && (
+              <div className={`result-box ${reloadResult.success ? 'success' : 'error'}`} style={{ marginTop: '8px', padding: '10px 14px' }}>
+                {reloadResult.success
+                  ? <p className="success-message">✅ {reloadResult.message}</p>
+                  : <p className="error-message">❌ {reloadResult.message}</p>
+                }
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -615,7 +661,7 @@ const DataUpload = () => {
               <p>
                 Select the year, month, and category (Grocery or Liquor), then upload your raw Excel/CSV file from the CSD POS system.
                 The file is saved to <strong>data/&lt;Year&gt;/&lt;Category&gt; &lt;Year&gt;/</strong> and archived in the SQLite database.
-                No model training happens at this step.
+                <strong>No model training happens at this step.</strong>
               </p>
             </div>
           </div>
@@ -623,9 +669,9 @@ const DataUpload = () => {
           <div className="instruction-step">
             <span className="step-number">2</span>
             <div>
-              <h3>Upload Multiple Months (Optional)</h3>
+              <h3>Upload All Months You Have</h3>
               <p>
-                You can upload data for multiple months before retraining. Each upload is stored independently in the raw archive.
+                You can upload as many months as needed before retraining. Each file is stored independently in the database.
                 If you upload the same month/year/category twice, you will be asked to confirm the overwrite.
               </p>
             </div>
@@ -634,11 +680,11 @@ const DataUpload = () => {
           <div className="instruction-step">
             <span className="step-number">3</span>
             <div>
-              <h3>Retrain the Model</h3>
+              <h3>Retrain Model When Ready</h3>
               <p>
-                Click <strong>"Retrain Model with Latest Data"</strong> to run the full pipeline.
-                This processes all raw files through <code>clean_and_group.py</code> → <code>prepare_dataset.py</code> → <code>kaggle_xgboost_pipeline.py</code>,
-                then hot-reloads the new model. The progress bar shows real-time status.
+                Once you've uploaded all your files, click <strong>"🔄 Retrain Model with Latest Data"</strong> on the right.
+                This runs the full pipeline: <code>clean_and_group.py</code> → <code>prepare_dataset.py</code> → <code>kaggle_xgboost_pipeline.py</code>,
+                then hot-reloads the new model. The progress bar at the top tracks each step in real-time.
               </p>
             </div>
           </div>
@@ -664,8 +710,8 @@ const DataUpload = () => {
           <div className="tip-item">
             <span className="tip-icon">📅</span>
             <div>
-              <h4>Monthly Workflow</h4>
-              <p>Upload each month's raw data as it becomes available, then retrain once all files for the period are uploaded.</p>
+              <h4>Batch Upload Workflow</h4>
+              <p>Upload all months you have first — Jan, Feb, Mar, etc. — then hit Retrain once. Training on all data together gives better accuracy than training after each file.</p>
             </div>
           </div>
           <div className="tip-item">
@@ -683,10 +729,10 @@ const DataUpload = () => {
             </div>
           </div>
           <div className="tip-item">
-            <span className="tip-icon">⚡</span>
+            <span className="tip-icon">🎯</span>
             <div>
-              <h4>Separate Upload & Train</h4>
-              <p>Upload saves raw data to the archive only. Click "Retrain" when you're ready to update the XGBoost model with all available data.</p>
+              <h4>Retrain Controls Training Timing</h4>
+              <p>You decide when training happens. Upload as many files as needed, review them with "Check Database", then retrain once everything looks correct.</p>
             </div>
           </div>
         </div>

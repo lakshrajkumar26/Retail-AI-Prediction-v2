@@ -14,6 +14,14 @@
   border-left: 3px solid #10b981;
 }
 
+.product-row.unknown {
+  border-left: 3px solid #475569;
+}
+
+.status-indicator.unknown {
+  opacity: 0.6;
+}
+
 .status-indicator {
   font-size: 1.25rem;
   display: inline-block;

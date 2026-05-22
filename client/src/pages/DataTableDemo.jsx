@@ -31,8 +31,7 @@ const DataTableDemo = () => {
     { key: 'current_stock', label: 'Current Stock', type: 'number', sortable: true },
     { key: 'final_prediction', label: 'Predicted Demand', type: 'number', sortable: true },
     { key: 'recommended_order', label: 'Recommended Order', type: 'number', sortable: true },
-    { key: 'price', label: 'Unit Price', type: 'currency', sortable: true },
-    { key: 'confidence', label: 'Confidence', type: 'percentage', sortable: true }
+    { key: 'price', label: 'Unit Price', type: 'currency', sortable: true }
   ];
 
   const loadData = useCallback(async (page) => {
@@ -228,7 +227,7 @@ const DataTableDemo = () => {
           <div className="feature-card">
             <div className="feature-icon">📈</div>
             <h3>Last N Months Prediction</h3>
-            <p>Use recent trends to predict future demand with confidence scores</p>
+            <p>Use recent trends to predict future demand accurately</p>
           </div>
 
           <div className="feature-card">

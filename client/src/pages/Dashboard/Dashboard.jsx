@@ -278,12 +278,11 @@ const ForecastTab = ({ data }) => {
       <div className="forecast-summary-row">
         <div className="forecast-stat"><div className="fs-label">{forecastMonths}-Month Projection</div><div className="fs-value blue">{data.summary.total_forecast_units.toLocaleString()} units</div></div>
         <div className="forecast-stat"><div className="fs-label">Avg Monthly ({data.max_year})</div><div className="fs-value">{avgMonthlyCurr?.toLocaleString()} units</div></div>
-        <div className="forecast-stat"><div className="fs-label">Confidence Level</div><div className="fs-value green">80.0%</div></div>
       </div>
 
       <div className="chart-card-new">
         <div className="chart-header-new">
-          <div><h3>Demand Forecast: Historical + AI Prediction</h3><p>Actual sales (green) with recursive XGBoost projections (blue) and confidence bands</p></div>
+          <div><h3>Demand Forecast: Historical + AI Prediction</h3><p>Actual sales (green) with recursive XGBoost projections (blue)</p></div>
         </div>
         <ChartBox height={400}>
           {(w, h) => (
@@ -329,42 +328,114 @@ const ForecastTab = ({ data }) => {
 };
 
 /* ── YEARWISE TAB ── */
-const YearwiseTab = ({ data }) => (
-  <div>
-    <div className="year-summary-cards">
-      {data.year_summary.map(y => (
-        <div key={y.year} className="year-card">
-          <div className="year-card-header"><span className="year-badge">{y.year}</span></div>
-          <div className="year-card-stats">
-            <div className="ys-stat"><label>Total Units</label><div className="val">{y.total_units.toLocaleString()}</div></div>
-            <div className="ys-stat"><label>Revenue</label><div className="val">₹{Math.round(y.total_revenue).toLocaleString()}</div></div>
-            <div className="ys-stat"><label>Avg Monthly</label><div className="val">{Math.round(y.avg_monthly_units).toLocaleString()}</div></div>
-            <div className="ys-stat"><label>Peak Month</label><div className="val green">{y.peak_month}</div></div>
-          </div>
-        </div>
-      ))}
-    </div>
+const YearwiseTab = ({ data }) => {
+  const [selectedYear, setSelectedYear] = React.useState(
+    data.year_summary.length > 0 ? data.year_summary[data.year_summary.length - 1].year : null
+  );
 
-    <div className="chart-card-new">
-      <div className="chart-header-new">
-        <div><h3>Monthly Sales: Year-over-Year</h3><p>Seasonal distribution comparison across years</p></div>
+  // Build monthly data for the selected year from monthly_series
+  const selectedYearMonthly = React.useMemo(() => {
+    if (!selectedYear || !data.monthly_series) return [];
+    return data.monthly_series.map(row => ({
+      month: row.month,
+      units: row[`y${selectedYear}`] || 0,
+    }));
+  }, [selectedYear, data.monthly_series]);
+
+  const maxUnits = selectedYearMonthly.length > 0
+    ? Math.max(...selectedYearMonthly.map(d => d.units))
+    : 1;
+
+  const YEAR_COLORS_MAP = ['#3b82f6', '#10b981', '#f59e0b', '#6366f1', '#ec4899', '#8b5cf6'];
+
+  return (
+    <div>
+      <div className="year-summary-cards">
+        {data.year_summary.map((y, idx) => (
+          <div
+            key={y.year}
+            className={`year-card${selectedYear === y.year ? ' year-card-selected' : ''}`}
+            onClick={() => setSelectedYear(y.year)}
+            style={{ cursor: 'pointer', transition: 'all 0.2s',
+              border: selectedYear === y.year
+                ? `2px solid ${YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length]}`
+                : '1px solid #334155',
+              boxShadow: selectedYear === y.year ? `0 0 0 2px ${YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length]}33` : 'none'
+            }}
+          >
+            <div className="year-card-header">
+              <span className="year-badge" style={{
+                background: selectedYear === y.year ? `${YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length]}33` : undefined,
+                color: selectedYear === y.year ? YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length] : undefined,
+                borderColor: selectedYear === y.year ? YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length] : undefined,
+              }}>{y.year}</span>
+              {selectedYear === y.year && <span style={{fontSize: '.7rem', color: YEAR_COLORS_MAP[idx % YEAR_COLORS_MAP.length], fontWeight: 700}}>● Viewing</span>}
+            </div>
+            <div className="year-card-stats">
+              <div className="ys-stat"><label>Total Units</label><div className="val">{y.total_units.toLocaleString()}</div></div>
+              <div className="ys-stat"><label>Revenue</label><div className="val">₹{Math.round(y.total_revenue).toLocaleString()}</div></div>
+              <div className="ys-stat"><label>Avg Monthly</label><div className="val">{Math.round(y.avg_monthly_units).toLocaleString()}</div></div>
+              <div className="ys-stat"><label>Peak Month</label><div className="val green">{y.peak_month}</div></div>
+            </div>
+          </div>
+        ))}
       </div>
-      <ChartBox height={380}>
-        {(w, h) => (
-          <BarChart width={w} height={h} data={data.monthly_series} barGap={4}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-            <XAxis dataKey="month" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} />
-            <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickFormatter={fmtY} />
-            <Tooltip {...TT} />
-            <Legend wrapperStyle={{ color: '#94a3b8' }} />
-            {data.years.map((yr, i) => (
-              <Bar key={yr} dataKey={`y${yr}`} name={`${yr}`} fill={i === 0 ? '#3b82f6' : '#10b981'} radius={[4, 4, 0, 0]} />
-            ))}
-          </BarChart>
-        )}
-      </ChartBox>
+
+      {/* Single-year monthly breakdown */}
+      {selectedYear && (
+        <div className="chart-card-new" style={{ borderColor: YEAR_COLORS_MAP[data.year_summary.findIndex(y => y.year === selectedYear) % YEAR_COLORS_MAP.length] + '66' }}>
+          <div className="chart-header-new">
+            <div>
+              <h3>📅 {selectedYear} — Monthly Sales Breakdown</h3>
+              <p>Click any year card above to switch the view</p>
+            </div>
+            <span className="chart-period" style={{
+              background: YEAR_COLORS_MAP[data.year_summary.findIndex(y => y.year === selectedYear) % YEAR_COLORS_MAP.length] + '22',
+              color: YEAR_COLORS_MAP[data.year_summary.findIndex(y => y.year === selectedYear) % YEAR_COLORS_MAP.length],
+              border: `1px solid ${YEAR_COLORS_MAP[data.year_summary.findIndex(y => y.year === selectedYear) % YEAR_COLORS_MAP.length]}55`
+            }}>{selectedYear}</span>
+          </div>
+          <ChartBox height={320}>
+            {(w, h) => {
+              const selIdx = data.year_summary.findIndex(y => y.year === selectedYear);
+              const barColor = YEAR_COLORS_MAP[selIdx % YEAR_COLORS_MAP.length];
+              return (
+                <BarChart width={w} height={h} data={selectedYearMonthly} margin={{ top: 5, right: 10, bottom: 5, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+                  <XAxis dataKey="month" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} />
+                  <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickFormatter={fmtY} />
+                  <Tooltip {...TT} formatter={(val) => [`${val.toLocaleString()} units`, selectedYear]} />
+                  <Bar dataKey="units" fill={barColor} radius={[6, 6, 0, 0]} name={`${selectedYear} Sales`} />
+                </BarChart>
+              );
+            }}
+          </ChartBox>
+        </div>
+      )}
+
+      <div className="chart-card-new">
+        <div className="chart-header-new">
+          <div><h3>Monthly Sales: Year-over-Year</h3><p>Seasonal distribution comparison across years</p></div>
+        </div>
+        <ChartBox height={380}>
+          {(w, h) => (
+            <BarChart width={w} height={h} data={data.monthly_series} barGap={4}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
+              <XAxis dataKey="month" stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} />
+              <YAxis stroke="#94a3b8" tick={{ fill: '#94a3b8', fontSize: 12 }} tickFormatter={fmtY} />
+              <Tooltip {...TT} />
+              <Legend wrapperStyle={{ color: '#94a3b8' }} />
+              {data.years.map((yr, i) => (
+                <Bar key={yr} dataKey={`y${yr}`} name={`${yr}`} fill={YEAR_COLORS_MAP[i % YEAR_COLORS_MAP.length]} radius={[4, 4, 0, 0]}
+                  opacity={selectedYear === null || selectedYear === yr ? 1 : 0.35}
+                />
+              ))}
+            </BarChart>
+          )}
+        </ChartBox>
+      </div>
     </div>
-  </div>
-);
+  );
+};
 
 export default Dashboard;

@@ -139,8 +139,7 @@ export const generatePredictionReport = (predictions, reportType = 'previous_yea
         'Low Sales': pred.statistics?.low_sales || 0,
         'High Sales': pred.statistics?.high_sales || 0,
         'Average Sales': pred.statistics?.average_sales || 0,
-        'Trend': pred.statistics?.trend || 'N/A',
-        'Confidence': '80.0%'
+        'Trend': pred.statistics?.trend || 'N/A'
       });
 
       // Add yearly breakdown
@@ -176,8 +175,7 @@ export const generatePredictionReport = (predictions, reportType = 'previous_yea
         'Low Sales': pred.statistics?.low_sales || 0,
         'High Sales': pred.statistics?.high_sales || 0,
         'Average Sales': pred.statistics?.average_sales || 0,
-        'Trend': pred.statistics?.trend || 'N/A',
-        'Confidence': '80.0%'
+        'Trend': pred.statistics?.trend || 'N/A'
       });
 
       // Add monthly breakdown

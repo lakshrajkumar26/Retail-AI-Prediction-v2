@@ -33,10 +33,11 @@ export const getTrendEmoji = (trend) => {
 /**
  * Get stock status
  */
-export const getStockStatus = (currentStock, predictedDemand) => {
+export const getStockStatus = (currentStock, predictedDemand, stockDataAvailable = true) => {
   const stock = safeNumber(currentStock);
   const demand = safeNumber(predictedDemand);
   
+  if (!stockDataAvailable) return { label: 'Unknown', class: 'unknown', emoji: '❓' };
   if (stock === 0) return { label: 'Out of Stock', class: 'critical', emoji: '🚨' };
   if (stock < demand * 0.5) return { label: 'Critical', class: 'critical', emoji: '🚨' };
   if (stock < demand) return { label: 'Low', class: 'low', emoji: '⚠️' };
@@ -74,10 +75,11 @@ export const getShortMonthName = (monthNumber) => {
 /**
  * Calculate order priority
  */
-export const getOrderPriority = (currentStock, predictedDemand, trend) => {
+export const getOrderPriority = (currentStock, predictedDemand, trend, stockDataAvailable = true) => {
   const stock = safeNumber(currentStock);
   const demand = safeNumber(predictedDemand);
   
+  if (!stockDataAvailable) return { label: 'Review', class: 'medium', priority: 3 };
   if (stock === 0) return { label: 'Urgent', class: 'urgent', priority: 1 };
   if (stock < demand * 0.5) return { label: 'High', class: 'high', priority: 2 };
   if (stock < demand) return { label: 'Medium', class: 'medium', priority: 3 };
@@ -104,18 +106,29 @@ export const processPrediction = (prediction) => {
   
   if (prediction.historical_sales && all_monthly_data.length === 0) {
     let sum = 0, count = 0, min = Infinity, max = -Infinity;
+    // Also build per-month stats (for correct min/max for the forecasted month)
+    const month_stats_map = {};  // { monthNum: { min, max, avg, count } }
     Object.keys(prediction.historical_sales).forEach(yr => {
       Object.keys(prediction.historical_sales[yr]).forEach(mo => {
         const sales = prediction.historical_sales[yr][mo];
+        const monthNum = parseInt(mo);
         all_monthly_data.push({
           year: parseInt(yr),
-          month: parseInt(mo),
+          month: monthNum,
           sales: sales
         });
         sum += sales;
         count++;
         if (sales < min) min = sales;
         if (sales > max) max = sales;
+        // Per-month aggregation
+        if (!month_stats_map[monthNum]) {
+          month_stats_map[monthNum] = { min: Infinity, max: -Infinity, sum: 0, count: 0 };
+        }
+        if (sales < month_stats_map[monthNum].min) month_stats_map[monthNum].min = sales;
+        if (sales > month_stats_map[monthNum].max) month_stats_map[monthNum].max = sales;
+        month_stats_map[monthNum].sum += sales;
+        month_stats_map[monthNum].count++;
       });
     });
     // Sort descending (newest first)
@@ -123,10 +136,18 @@ export const processPrediction = (prediction) => {
     
     if (count > 0) {
       historical_stats = {
-        min, max, avg: sum / count, count: Object.keys(prediction.historical_sales).length
+        min, max, avg: sum / count, count: Object.keys(prediction.historical_sales).length,
+        month_stats: Object.fromEntries(
+          Object.entries(month_stats_map).map(([m, s]) => [m, {
+            min: s.min === Infinity ? 0 : s.min,
+            max: s.max === -Infinity ? 0 : s.max,
+            avg: s.count > 0 ? s.sum / s.count : 0,
+            count: s.count
+          }])
+        )
       };
     } else {
-      historical_stats = { min: 0, max: 0, avg: 0, count: 0 };
+      historical_stats = { min: 0, max: 0, avg: 0, count: 0, month_stats: {} };
     }
   }
 
@@ -146,13 +167,12 @@ export const processPrediction = (prediction) => {
     final_prediction: finalPrediction,
     predicted_demand: finalPrediction,
     current_stock: currentStock,
-    confidence: confidence,
+    stock_data_available: prediction.stock_data_available !== false,  // default true for backwards compat
     growth_rate: growthRate,
     trend: trend,
     recommended_order: Math.max(0, Math.round(finalPrediction - currentStock)),
-    stock_status: getStockStatus(currentStock, finalPrediction),
-    confidence_level: getConfidenceLevel(confidence),
-    order_priority: getOrderPriority(currentStock, finalPrediction, trend),
+    stock_status: getStockStatus(currentStock, finalPrediction, prediction.stock_data_available !== false),
+    order_priority: getOrderPriority(currentStock, finalPrediction, trend, prediction.stock_data_available !== false),
     trend_label: getTrendLabel(trend),
     trend_emoji: getTrendEmoji(trend),
   };
@@ -223,9 +243,8 @@ export const sortPredictions = (predictions, sortBy, sortOrder) => {
         break;
       
       case 'confidence':
-        aVal = a.confidence;
-        bVal = b.confidence;
-        break;
+        // confidence no longer returned by API — skip sort
+        return 0;
       
       default:
         return 0;
@@ -269,7 +288,6 @@ export const calculateSummary = (predictions) => {
     increasingTrend,
     decreasingTrend,
     stableTrend,
-    avgConfidence: 0.8, // Hardcoded as per user request
   };
 };
 

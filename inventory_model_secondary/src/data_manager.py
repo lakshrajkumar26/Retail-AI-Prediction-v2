@@ -1,14 +1,13 @@
 """
 Data Manager
 =============
-Handles data access from the master training CSV and the SQLite database.
-Provides statistics, item lookups, and analytics helpers.
+Handles data access from the SQLite database and provides statistics,
+item lookups, and analytics helpers.
 
-COMPLICATION: The system uses TWO data sources:
-  1. master_training_data.csv — primary source for ML features and predictions
-  2. inventory_sales.db — used by the upload/management features and legacy Dashboard
-If these get out of sync (e.g., user uploads new data to DB but doesn't regenerate CSV),
-predictions will not reflect the latest data. The /retrain endpoint addresses this.
+SINGLE SOURCE OF TRUTH:
+  All clean raw ledger entries are saved to SQLite table inventory_sales,
+  and prepared training/inference features are saved to master_training_data.
+  No Excel or CSV files are stored on disk.
 """
 
 import pandas as pd
@@ -19,7 +18,6 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DB_PATH = BASE_DIR / "converted_dataset" / "inventory_sales.db"
-DATA_PATH = BASE_DIR / "data" / "master_training_data.csv"
 
 
 class DataManager:

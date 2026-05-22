@@ -279,17 +279,22 @@ export const getBulkPrediction = async (storeId, predictionDate, requestData) =>
       
       return {
         item_name: p.item_name || 'Unknown',
+        item_id: p.item_id || '',
+        group: p.group || '',
         final_prediction: parseFloat(p.final_prediction) || 0,
         xgb_prediction: parseFloat(p.xgb_prediction) || 0,
         prophet_prediction: p.prophet_prediction || null,
         current_stock: parseInt(p.current_stock) || 0,
+        stock_data_available: p.stock_data_available !== false,  // default true for backwards compat
         recommended_order: parseInt(p.recommended_order) || 0,
         price: parseFloat(p.price) || 0,
+        purchase_price: parseFloat(p.purchase_price) || 0,
         method: p.method || 'xgboost_only',
-        confidence: p.confidence || 0.892,
         category: p.category || 'Grocery',
+        trend: p.trend || 'stable',
+        growth_rate: parseFloat(p.growth_rate) || 0,
         historical_sales: p.historical_sales || null,
-        last_4_weeks: last_4_weeks  // Add last_4_weeks for table display
+        last_4_weeks: last_4_weeks
       };
     });
     
@@ -358,15 +363,20 @@ export const getBulkPredictionPaginated = async (storeId, predictionDate, page =
       
       return {
         item_name: p.item_name || 'Unknown',
+        item_id: p.item_id || '',
+        group: p.group || '',
         final_prediction: parseFloat(p.final_prediction) || 0,
         xgb_prediction: parseFloat(p.xgb_prediction) || 0,
         prophet_prediction: p.prophet_prediction || null,
         current_stock: parseInt(p.current_stock) || 0,
+        stock_data_available: p.stock_data_available !== false,  // default true for backwards compat
         recommended_order: parseInt(p.recommended_order) || 0,
         price: parseFloat(p.price) || 0,
+        purchase_price: parseFloat(p.purchase_price) || 0,
         method: p.method || 'xgboost_only',
-        confidence: p.confidence || 0.892,
         category: p.category || 'Grocery',
+        trend: p.trend || 'stable',
+        growth_rate: parseFloat(p.growth_rate) || 0,
         historical_sales: p.historical_sales || null,
         last_4_weeks: last_4_weeks
       };
@@ -415,6 +425,17 @@ export const trainModel = async () => {
     return res.data;
   } catch (error) {
     console.error("Error training model:", error);
+    throw error;
+  }
+};
+
+// Reload forecaster data + clear prediction cache (without full server restart)
+export const reloadForecaster = async () => {
+  try {
+    const res = await apiClient.post(`/reload-forecaster`);
+    return res.data;
+  } catch (error) {
+    console.error("Error reloading forecaster:", error);
     throw error;
   }
 };
@@ -505,7 +526,7 @@ export const getDataFormat = async () => {
       "If a file for the same month/year/category already exists, you will be prompted to confirm overwrite",
       "Column names must match exactly (S.No, GP_Index_No, pluno, Item_Name, etc.)",
       "CSV files should be comma-separated with headers in the first row",
-      "Uploading data does NOT auto-retrain the model — click 'Retrain Model' separately"
+      "After upload, the model retrains automatically in the background — watch the training progress banner"
     ]
   };
 };
@@ -567,10 +588,9 @@ export const updateStock = async (updates) => {
   }
 };
 
-// Retrain model with latest data
+// Retrain model with latest data (now returns immediately - runs in background)
 export const retrainModel = async () => {
   try {
-    // Use Production API retrain endpoint
     const res = await apiClient.post(`/retrain`);
     return res.data;
   } catch (error) {
